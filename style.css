@@ -170,3 +170,11 @@ label.opt.block input { margin-right: 8px; accent-color: var(--accent); }
 .ink-eopts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; font-size: 13px; }
 .ink-flash { background: var(--bad); color: #1a0505; padding: 8px 12px; border-radius: 8px; margin-bottom: 8px; font-weight: 700; animation: blink 1s infinite; }
 .ink-hint { margin-top: 6px; font-size: 12px; }
+
+/* ☁️ 同步狀態燈 */
+#syncpill { position: fixed; top: 8px; right: 10px; z-index: 50; font-size: 12px; padding: 4px 10px; border-radius: 999px; cursor: pointer; border: 1px solid transparent; background: var(--panel2); }
+#syncpill.ok { color: var(--ok); border-color: var(--ok); }
+#syncpill.mid { color: var(--warn); border-color: var(--warn); }
+#syncpill.warn { color: var(--bad); border-color: var(--bad); animation: blink 1.6s infinite; }
+#syncpill.off { color: var(--dim); border-color: var(--dim); }
+@media (max-width: 600px) { #syncpill { top: auto; bottom: 10px; right: 10px; } }

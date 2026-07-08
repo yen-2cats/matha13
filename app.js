@@ -684,6 +684,7 @@ function renderDrillMenu() {
 
 let drill = null;
 function startDrill(key) {
+  if (!syncGate()) return;
   drill = { key, items: [], i: 0, results: [], t0: 0 };
   for (let i = 0; i < 12; i++) drill.items.push(DRILLS[key].gen());
   sessionActive = true;
@@ -787,6 +788,7 @@ function renderPracConfig() {
 }
 let prac = null;
 function startPrac() {
+  if (!syncGate()) return;
   const topics = [...document.querySelectorAll('#topicChips input:checked')].map((i) => i.value);
   const diffs = [...document.querySelectorAll('#diffChips input:checked')].map((i) => +i.value);
   const cnt = +document.querySelector('#cntChips input:checked').value;
@@ -962,6 +964,7 @@ function buildPaper() {
   return shuffle([...byDiff(1, 5), ...byDiff(2, 5), ...byDiff(3, 2)]);
 }
 function startMock() {
+  if (!syncGate()) return;
   const paper = buildPaper();
   mock = {
     paper, orig: paper.slice(), i: 0, round: 1, skipped: [],
@@ -1136,8 +1139,8 @@ function renderWrong() {
     說不出來就還沒訂正完，重測時會原形畢露。</p></div>`;
 }
 let review = null;
-function reviewDue() { startReview(dueWrong()); }
-function reviewOne(id) { startReview([id]); }
+function reviewDue() { if (!syncGate()) return; startReview(dueWrong()); }
+function reviewOne(id) { if (!syncGate()) return; startReview([id]); }
 function startReview(ids) {
   review = { ids: shuffle(ids), i: 0, okN: 0 };
   sessionActive = true;
@@ -1315,26 +1318,57 @@ let supa = null;
 let syncState = { user: null, msg: '', last: null };
 let syncTimer = null;
 function supaInit() {
-  if (!window.supabase) return; // CDN 被擋（artifact 環境）→ 純本機模式
+  if (!window.supabase) { syncPill(); return; } // CDN 被擋（artifact 環境）→ 純本機模式
   supa = window.supabase.createClient(SUPA_URL, SUPA_KEY);
   supa.auth.onAuthStateChange((ev, session) => {
     const was = syncState.user && syncState.user.id;
     syncState.user = session ? session.user : null;
     if (syncState.user && syncState.user.id !== was) syncPull();
+    syncPill();
   });
+  window.addEventListener('online', () => { if (syncState.user) syncPush(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && syncState.user) { clearTimeout(syncTimer); syncPush(); }
+  });
+  syncPill();
 }
 function syncQueue() {
   if (!supa || !syncState.user) return;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(syncPush, 4000);
 }
+/* 同步狀態燈（常駐右上角）＋開始做題前的登入攔檢 */
+function syncPill() {
+  let el = $('#syncpill');
+  if (!el) {
+    el = el || document.createElement('div');
+    el.id = 'syncpill';
+    el.onclick = () => nav('stats');
+    document.body.appendChild(el);
+  }
+  if (!supa) { el.textContent = '⚫ 離線版（無法同步）'; el.className = 'off'; return; }
+  if (!syncState.user) { el.textContent = '🔴 未登入——紀錄只存本機'; el.className = 'warn'; return; }
+  el.textContent = syncState.pushErr ? '🟡 ' + syncState.msg : '🟢 ☁ ' + (syncState.msg || '已登入');
+  el.className = syncState.pushErr ? 'mid' : 'ok';
+}
+function syncGate() {
+  // 回傳 true = 放行。沒登入時攔下來問，避免「做了題但沒上雲」而不自知。
+  if (!supa || syncState.user) return true;
+  if (confirm('⚠️ 尚未登入雲端同步！\n\n現在開始做題，紀錄只會存在這台裝置的瀏覽器裡——換裝置、清瀏覽器就沒了。\n\n按「確定」先去登入（推薦）\n按「取消」仍然開始（僅本機保存）')) {
+    nav('stats');
+    return false;
+  }
+  return true;
+}
 async function syncPush() {
   if (!supa || !syncState.user) return;
   try {
     const { error } = await supa.from('app_state')
       .upsert({ user_id: syncState.user.id, data: S, updated_at: new Date().toISOString() });
+    syncState.pushErr = !!error;
     syncState.msg = error ? '上傳失敗：' + error.message : '已同步 ' + new Date().toTimeString().slice(0, 5);
-  } catch (e) { syncState.msg = '離線（資料在本機，連上後自動補傳）'; }
+  } catch (e) { syncState.pushErr = true; syncState.msg = '離線（資料在本機，連上後自動補傳）'; }
+  syncPill();
 }
 async function syncPull() {
   if (!supa || !syncState.user) return;
@@ -1348,7 +1382,7 @@ async function syncPull() {
       updateBadge();
     }
     syncPush();
-  } catch (e) { syncState.msg = '離線（資料在本機）'; }
+  } catch (e) { syncState.msg = '離線（資料在本機）'; syncPill(); }
 }
 function mergeState(a, b) {
   // 兩台裝置各自累積也不丟資料：紀錄類取聯集，其餘欄位取較「多」的一方
