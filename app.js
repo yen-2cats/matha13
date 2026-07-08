@@ -21,12 +21,32 @@ function exportData() {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+function unionById(a, b) {
+  const out = [...(b || [])];
+  const have = new Set(out.map((x) => x.id));
+  for (const x of a || []) if (!have.has(x.id)) { out.push(x); have.add(x.id); }
+  return out;
+}
+function applyExtBank() {
+  if (!S.extbank || !Array.isArray(S.extbank)) return;
+  const have = new Set(BANK.map((q) => q.id));
+  for (const q of S.extbank) if (q && q.id && !have.has(q.id)) { BANK.push(q); have.add(q.id); }
+}
 function importData(input) {
   const f = input.files[0]; if (!f) return;
   const r = new FileReader();
   r.onload = () => {
     try {
       const d = JSON.parse(r.result);
+      if (d && Array.isArray(d.extbank) && !Array.isArray(d.attempts)) {
+        // 題包檔：只併入外部題庫（如大考中心歷屆題），不動做題紀錄
+        if (!confirm(`這是題包檔，含 ${d.extbank.length} 題${d.name ? '（' + d.name + '）' : ''}。併入後主題刷題與模擬會自動納入這些題目，確定？`)) return;
+        S.extbank = unionById(d.extbank, S.extbank);
+        save();
+        alert(`已併入。外部題庫目前共 ${S.extbank.length} 題。`);
+        location.reload();
+        return;
+      }
       if (!d || !Array.isArray(d.attempts)) { alert('這不是本系統的備份檔（缺 attempts 欄位）。'); return; }
       const cur = S.attempts.length;
       if (!confirm(`備份檔含 ${d.attempts.length} 筆作答紀錄、${Object.keys(d.wrong || {}).length} 題錯題。\n匯入會覆蓋目前這個瀏覽器裡的 ${cur} 筆紀錄，確定？`)) return;
@@ -982,7 +1002,7 @@ function renderQuestion(q, cfg) {
   }
   app().innerHTML = `
     <div class="session-head">
-      <span>${cfg.head}｜${TOPICS[q.topic]}｜${'★'.repeat(q.diff)}${'☆'.repeat(3 - q.diff)}｜目標 ${fmtSec(target)}</span>
+      <span>${cfg.head}｜${TOPICS[q.topic]}${q.src ? `｜<b class="accent">${q.src}</b>` : ''}｜${'★'.repeat(q.diff)}${'☆'.repeat(3 - q.diff)}｜目標 ${fmtSec(target)}</span>
       <span id="qtimer" class="timer">00:00</span>
     </div>
     <div class="timebar"><div id="tbfill" class="timebar-fill"></div></div>
@@ -1509,6 +1529,7 @@ async function syncPull() {
     if (data && data.data) {
       S = mergeState(S, data.data);
       localStorage.setItem(KEY, JSON.stringify(S));
+      applyExtBank();
       syncState.msg = '已從雲端合併';
       updateBadge();
     }
@@ -1524,6 +1545,7 @@ function mergeState(a, b) {
     if (!seen.has(k)) { seen.add(k); attempts.push(x); }
   }
   attempts.sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  const extbank = unionById(a.extbank, b.extbank);
   const wrong = { ...(b.wrong || {}), ...(a.wrong || {}) };
   for (const q of Object.keys(b.wrong || {})) {
     const A = (a.wrong || {})[q], B = b.wrong[q];
@@ -1540,7 +1562,7 @@ function mergeState(a, b) {
   for (const m of b.mocks || []) if (!mset.has(JSON.stringify(m))) mocks.push(m);
   const daily = { ...(b.daily || {}) };
   for (const d of Object.keys(a.daily || {})) daily[d] = { ...(daily[d] || {}), ...a.daily[d] };
-  return { ...b, ...a, attempts, wrong, drills, mocks, daily };
+  return { ...b, ...a, attempts, wrong, drills, mocks, daily, extbank };
 }
 function syncInk(qid, t0, proc) {
   if (!supa || !syncState.user) return;
@@ -1591,6 +1613,7 @@ function boot() {
   const navEl = $('nav');
   navEl.innerHTML = Object.keys(VIEWS).map((v) =>
     `<button data-view="${v}" onclick="nav('${v}')">${VIEWS[v].label}</button>`).join('');
+  applyExtBank();
   supaInit();
   nav('home');
 }
