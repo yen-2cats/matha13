@@ -438,7 +438,12 @@ function aiKey() {
 function aiKeyMigrate() {
   try {
     const lk = localStorage.getItem(AI_LS);
-    if (lk && !S.aikey) { S.aikey = lk; S.aikeyTs = Date.now(); save(); }
+    if (!lk) return;
+    localStorage.removeItem(AI_LS); // 搬一次就清掉，避免舊值反覆還魂
+    // 舊版留下的 OAuth token（sk-ant-oat）會過期，直接丟棄不搬
+    if (/^sk-ant-oat/.test(lk)) return;
+    // 用最舊的時間戳搬入：只有在雲端完全沒 key 時才會被採用，絕不蓋掉使用者後來存的 key
+    if (!S.aikey) { S.aikey = lk; S.aikeyTs = 1; save(); }
   } catch (e) {}
 }
 function aiKeySave() {
@@ -446,8 +451,9 @@ function aiKeySave() {
   if (!v || v.startsWith('••')) { alert('沒有變更。'); return; }
   S.aikey = v;
   S.aikeyTs = Date.now();
+  try { localStorage.removeItem(AI_LS); } catch (e) {} // 清掉舊版殘留，防止還魂
   save(); // → 雲端同步，所有裝置生效
-  alert('已儲存。登入同一帳號的每台裝置（桌機/手機/平板）都會自動拿到這支 key，手寫作答按「算完了」就會 AI 批改。');
+  alert('已儲存。登入同一帳號的每台裝置（桌機/手機/平板）都會自動拿到這支 key，記得按「測試連線」確認。');
   renderStats();
 }
 function aiKeyClear() {
@@ -2687,16 +2693,20 @@ function syncInk(qid, t0, proc) {
   supaInkInsert({ user_id: syncState.user.id, qid, t0, proc: proc || null, strokes: { s: strokes, e: eras, q: qmarks, a: answers } });
 }
 async function syncLogin(isSignup) {
-  const email = $('#sy-email').value.trim();
+  let email = $('#sy-email').value.trim();
+  if (email && !email.includes('@')) email += '@gmail.com'; // 打帳號就好，自動補網域
   const pass = $('#sy-pass').value;
-  if (!email || pass.length < 6) { syncState.msg = 'email 或密碼格式不對（密碼至少 6 碼）'; renderStats(); return; }
+  if (!email || pass.length < 6) { syncState.msg = '帳號或密碼格式不對（密碼至少 6 碼）'; renderStats(); return; }
   syncState.msg = '處理中…'; renderStats();
   const { data, error } = isSignup
     ? await supa.auth.signUp({ email, password: pass })
     : await supa.auth.signInWithPassword({ email, password: pass });
   if (error) syncState.msg = (isSignup ? '註冊' : '登入') + '失敗：' + error.message;
   else if (isSignup && !data.session) syncState.msg = '註冊成功——去收信點確認連結後回來登入（或到 Supabase 後台 Auth 設定關掉 Confirm email）';
-  else syncState.msg = '登入成功，同步啟動';
+  else {
+    syncState.msg = '登入成功，同步啟動';
+    try { localStorage.setItem('mathA13_email', email); } catch (e) {}
+  }
   renderStats();
 }
 async function syncLogout() {
@@ -2711,8 +2721,8 @@ function syncCard() {
     <p class="dim">這個網頁環境封鎖外部連線（claude.ai artifact），雲端同步自動停用——資料照常存本機，可用下方備份匯出。
     要用同步版請開本機版 index.html 或自架網址。</p></div>`;
   if (!syncState.user) return `<div class="card"><h2>☁️ 雲端同步</h2>
-    <p class="dim">登入後：做題紀錄跨裝置自動同步、手寫筆跡永久保存（換裝置、清瀏覽器都不怕）。第一次用「註冊」。</p>
-    <input id="sy-email" class="ans-input" autocomplete="username" placeholder="email">
+    <p class="dim">登入後：做題紀錄跨裝置自動同步、手寫筆跡永久保存（換裝置、清瀏覽器都不怕）。帳號打使用者名稱就好，不用完整 email。</p>
+    <input id="sy-email" class="ans-input" autocomplete="username" placeholder="帳號（不用打 @gmail.com）" value="${escH((() => { try { return (localStorage.getItem('mathA13_email') || '').replace(/@gmail\.com$/, ''); } catch (e) { return ''; } })())}">
     <input id="sy-pass" class="ans-input" type="password" autocomplete="current-password" placeholder="密碼（至少 6 碼）">
     <div class="actr">
       <button class="btn" onclick="syncLogin(true)">註冊</button>
