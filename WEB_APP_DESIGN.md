@@ -1,0 +1,132 @@
+# 數A 特訓系統 — Web App 系統設計（交接文件）
+
+> 2026-07-09 建立。給接手開發 app 的模型：這份講**程式本身的架構、資料模型、功能系統、修改與部署方式**。內容生產線（題庫/類題/蒸餾）看 OPERATIONS.md。戰略與診斷看 README.md。
+
+## 0. 一句話架構
+
+**單頁純前端 vanilla JS，無框架、無 build step、無 npm**。四個檔案（index.html/style.css/bank.js/app.js）直接開就能跑。資料離線優先存 localStorage，登入後鏡像同步到 Supabase。手機電腦皆可，響應式。
+
+## 1. 檔案結構（worktree 分支 claude/math-exam-prep-7c2pg4）
+
+```
+index.html   16 行：外殼。<header><nav></nav></header> + <main id="app"></main> + supabase CDN + bank.js + app.js
+style.css    180 行：深色主題，CSS 變數在 :root（--bg/--panel/--accent/--ok/--bad/--warn…）
+bank.js      513 行：TOPICS(14單元) + DIFF_TARGET + BANK(83題陣列) + GRADE_TABLE
+app.js       1621 行：全部邏輯。載入即 boot()，用 hash-less 的 nav() 切換 7 個 view，每個 view 是一個 render 函式把 HTML 塞進 #app
+```
+
+**渲染模型**：沒有虛擬 DOM。每個 view 是 `renderXxx()` 函式，直接 `app().innerHTML = \`...\``。互動用 inline `onclick="fn()"` 呼叫全域函式（所有函式都是全域，因為 app.js 不是 module）。狀態變了就重新 render 整個 view。
+
+## 2. 資料模型
+
+### 2.1 全域狀態 S（存 localStorage 的 key = 'mathA13'）
+```js
+S = {
+  attempts: [ { qid, ok, ms, err, d(日期), mode, ts(時間戳), p?(手寫過程) } ],  // 每次作答
+  wrong:    { <qid>: { fails, wins, itv(間隔天數), err, due(下次重測日) } },       // 錯題本
+  drills:   { <drillKey>: [ { d, med(中位數ms), acc } ] },                          // 速度特訓歷史
+  mocks:    [ { d, ok, n, acc } ],                                                  // 模擬成績
+  daily:    { <日期>: { <taskKey>: true } },                                        // 每日清單打勾
+  extbank:  [ …外部題(官方/講義/類題) ],   // 私有層題庫，見 OPERATIONS.md §3
+  inkcfg:   { m, r },                        // 橡皮擦偏好
+  ver: 1,
+}
+```
+`load()`(app.js:8) 讀 localStorage，`save()`(app.js:15) 寫回並觸發 `syncQueue()`（雲端 debounce 上傳）。
+
+### 2.2 題目 schema（BANK 與 extbank 共用）
+```js
+{ id, topic(14單元鍵), type('single'|'multi'|'fill'), diff(1|2|3), q,
+  opts?(選擇題陣列), ans(single/multi=0-based索引陣列; fill=[字串]),
+  sol(詳解), tip(快解), target?(自訂目標秒數), src?(來源標記) }
+```
+- 14 單元鍵見 TOPICS：num line poly seq comb prob data trig1 trig2 exp vec svec splane mat
+- `qTarget(q)`(app.js:473)：目標時間 = q.target || DIFF_TARGET[q.diff]（易90/中150/難240秒）
+- `checkFill`(app.js:461)：填充題判分，先 norm() 正規化（全形/負號/空白/x=前綴），再 parseFrac 比數值
+- `applyExtBank()`(app.js:30)：把 S.extbank 併進全域 BANK 陣列（id 去重），boot 時與雲端 pull 後都會呼叫
+
+## 3. 七個 View（nav 切換，VIEWS 物件 app.js:518）
+
+| view | 函式 | 功能 |
+|---|---|---|
+| 📋 診斷 home | renderHome:545 | 首頁：倒數天數、體感級分、診斷書、四訓練線、三階段路線、考場SOP |
+| ⚡ 速度特訓 drill | renderDrillMenu:770 | 12 種基本運算限時連發（見 §4.1）|
+| 🎯 主題刷題 prac | renderPracConfig:913 | 選單元→逐題計時作答→錯因分類（見 §4.2）|
+| ⏱️ 模擬實戰 mock | renderMockIntro:1084 | 12題36分、兩輪作答、考場模式（見 §4.3）|
+| 📓 錯題本 wrong | renderWrong:1267 | 間隔重測 1→3→7→14 天（見 §4.4）|
+| 📊 數據 stats | renderStats:1322 | 單元答對率/速度、錯因處方、過程診斷、雲端同步卡、備份卡 |
+| 🗓️ 作戰計畫 plan | renderPlan:1404 | 每日清單、三階段路線表、考場SOP |
+
+`nav(view)`(app.js:528)：切 view 前若 sessionActive 會 confirm、關手寫板、停碼表。
+
+## 4. 核心功能系統
+
+### 4.1 速度特訓（DRILLS，app.js:610）
+12 種程式隨機生成的基本運算，每輪 12 題。每種是 `{ name, desc, target(秒), gen() }`，gen 回傳一題。
+- 種類：tri(特殊角三角值) logexp(指對數) quad(二次頂點) rem(餘式) cnk(排列組合數) dot(向量內積) seqd(等差等比) mul(兩位數心算) quadroot(解一元二次) frac(分數四則) root(根式化簡) mat2(2×2矩陣)。後四種是 2026-07-09 依歷屆原子運算頻率評選新增。
+- 流程：startDrill→drillNext→drillSubmit→drillDone。**達標＝中位數≤目標秒 且 12題全對**（兩條件，drillDone:844 有逐條顯示）。結果頁有：判定(敗在速度or準度的對症處方)、錯題卡、卡頓題(耗時>中位數2倍)、逐題明細、近6輪走勢。
+
+### 4.2 主題刷題（renderQuestion:988 共用單題渲染）
+選單元→startPrac→pracNext→renderQuestion→qSubmit→qFinish。每題：碼表+目標時間進度條、手寫計算區(見§4.5)、作答後顯示詳解+快解+過程摘要+回放按鈕。答錯→錯因四分類 chips（概念不熟/計算失誤/看錯題意/用猜的）；對但超時1.5倍→標記進錯題本重練速度。`recordAttempt`(485) 記錄並更新 wrong。
+
+### 4.3 模擬實戰（mock，app.js:1104~1266）
+buildPaper 抽 12 題（易5中5難2、儘量不同單元）。兩輪作答：第一輪知道第一步就做、不知道按跳過；第二輪處理跳過題。36分倒數。**考場模式手寫板**（inkHTML(true)/inkStart(...,true)）：空間固定、無橡皮擦、不可加長（跟考場一樣）。mockGrade 結算，作答中不顯示對錯。
+
+### 4.4 錯題本 + 間隔重測（renderWrong:1267）
+Leitner 式：itv 1→3→7→14 天。`reviewResult`(499)：對了升級間隔、連對四次(itv>14)畢業移除；錯了打回 itv=1。`dueWrong`(512) 取今天到期題。到期題投報率標為刷新題3倍。訂正標準卡（林岳版：說得出關鍵條件→工具→第一步才算訂正完）。
+
+### 4.5 手寫過程偵測（ink 系統，app.js:81~403）★特色功能
+平板+觸控筆在每題下方手寫計算，每筆帶時間戳。
+- **偵測**：起筆猶豫(fi)、題中停頓(hes,≥15秒)、塗改(era)、尾段放棄(tail)。inkStop(305) 算出這些指標存進 attempt.p。
+- **即時跳題警示**：inkWatch(329) 超過目標時間又30秒無筆跡→畫面閃警示+震動。
+- **橡皮擦仿 Samsung Notes**：整筆(inkEraseStroke)/區域(inkEraseArea 切子筆畫)兩模式、三段粗細、虛線游標圈。偏好存 S.inkcfg。
+- **畫布**：診斷模式可往下自動加長(inkExtend)、手指捲動筆寫字(touch-action pan-y)、手掌防誤觸(inkAllow 偵測pen後忽略touch)。考場模式全禁。
+- **回放**：inkReplay(357) 8倍速重播解題過程，標出停頓與塗改點。
+- **匯出**：exportInk(394) 匯出當次筆跡 JSON。sessionInk 只存頁面記憶體，關頁即失（要深度分析先匯出）。
+
+### 4.6 數據診斷（renderStats:1322）
+單元答對率+速度比(實際耗時÷目標)橫條、錯因分布→對症處方、速度特訓進度、模擬走勢、**過程診斷卡**(起筆/停頓/塗改/最嚴重卡點Top3)、雲端同步卡、備份卡。worst 單元＝答對率最低/耗時比最高→「本週優先攻擊」。
+
+### 4.7 級分換算（GRADE_TABLE bank.js:504, gradeOf app.js:474）
+依 113~115 官方級距平均：15級≥84%、14級≥78%、13級🎯≥72%、12級≥66%…9級≥48%。目標雙線制 73%保底13級/80%攻14級。
+
+## 5. 雲端同步（Supabase，app.js:1466~1610）
+
+**離線優先**：沒登入/沒網路一切照常存 localStorage。登入後：
+- `save()`→`syncQueue()`(1486) debounce 4秒→`syncPush()`(1514) upsert 整包 S 到 app_state 表
+- 登入時 `syncPull()`(1524) 下載雲端 S、用 `mergeState`(1539) 與本機合併（attempts/mocks/drills 聯集、extbank 聯集，不丟資料）→ applyExtBank
+- 手寫筆跡逐題 `syncInk`(1567) insert 到 ink_sessions 表（永久歸檔）
+- `syncPill`(1492) 右上角常駐狀態燈（🟢已同步/🔴未登入/⚫離線版）；`syncGate`(1505) 開始做題前若未登入攔下來問
+- 切分頁/斷網重連時強制補傳（supaInit 的事件監聽）
+- **artifact 環境**（claude.ai）CSP 擋外部連線→ supa=null→ 自動降級純本機模式（syncCard 顯示提示）
+- 後端細節（帳號、RLS、schema）見 memory `matha-supabase-backend` 與 OPERATIONS.md §二
+
+## 6. 修改與部署
+
+### 改碼流程
+1. 在 worktree 改 app.js/bank.js/style.css
+2. `node --check app.js && node --check bank.js` 語法檢查
+3. preview 驗證：launch.json 有 `matha-static`（port 8737，用 scratchpad 的 serve.js 靜態服務）。preview_start→在瀏覽器實跑→改完 preview_stop
+4. `git add … && git commit && git push origin claude/math-exam-prep-7c2pg4`
+
+### 部署三處（順序固定，見 OPERATIONS.md §二）
+1. worktree 分支（開發）
+2. **matha13 公開 repo → GitHub Pages**（正式站，使用者主入口 https://yen-2cats.github.io/matha13/）：`cp index.html style.css bank.js app.js README.md C:/Users/yenke/desktop/matha13/` → 那邊 commit push → Pages 約40秒生效
+3. **artifact 離線備用版**：把 style.css/bank.js/app.js 內嵌成單一 HTML（結構見 OPERATIONS.md §二.3）→ Artifact 工具、favicon 📐、url ee29beef-8400-420d-b68a-a4f6ab489b21
+
+### 測試手法（血淚）
+- 背景分頁會節流 setTimeout（自動跳題的500ms變分鐘級）→ 測試時攔截 setTimeout 同步驅動，或保持分頁前景
+- 大量互動測試前先 location.reload() 清掉殘留的計時器/session 狀態
+- ink 相關測試用 PointerEvent 派發（pointerType:'mouse' 可繞過手掌防誤觸）
+
+## 7. 設計決策（別重新翻案，見 OPERATIONS.md §五）
+- 純 vanilla JS 無 build：使用者要能直接開檔、artifact 要能單檔內嵌、降低維護面
+- 離線優先 + 雲端鏡像：考生不能因網路斷就不能練
+- 診斷模式(工具齊全) vs 考場模式(固定空間無橡皮擦)：主題刷題求快速迭代抓卡點、模擬實戰練考場不便
+- 達標雙條件(速度+準度)：手比腦快的錯比慢更貴
+- 目標雙線制 73%/80%、檢查15~20分、90秒停損：見 README §五外部核對
+
+## 8. 已知待辦（app 端）
+- extbank 破千前把外部題庫從 app_state 搬獨立資料表（每次同步上傳好幾MB會撞瀏覽器上限）
+- 需圖的題（needsFigure）目前略過，未來補 SVG 版
+- 老師蒸餾的 sol/tip 回寫（見 OPERATIONS.md §3.5）：enrichment 注入雲端 extbank 對應題；教學風格檔案與按單元方法庫要決定存哪（app_state 新欄位 or 獨立結構）+ 做 UI 在錯題/概念洞時調出老師方法
