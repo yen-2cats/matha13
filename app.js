@@ -64,230 +64,184 @@ function backupCard() {
     <button class="btn" onclick="$('#impfile').click()">匯入備份</button>
     <button class="btn" onclick="exportInk()">匯出今日筆跡</button>
     <input type="file" id="impfile" accept=".json,application/json" style="display:none" onchange="importData(this)">
-    <p class="dim">筆跡（手寫板的完整書寫過程）只存在本次開啟的頁面記憶體，<b>關掉頁面就消失</b>——想要深度過程分析的那天，練完先匯出。</p>
+    <p class="dim">筆跡（手寫板的完整書寫過程）：<b>登入雲端同步時每題自動永久歸檔</b>，供 AI 後續統整分析你的運算習慣；未登入的話只存在本次頁面記憶體，關頁就消失——沒登入練完記得先匯出。</p>
   </div>`;
 }
 
 /* ═══════════ ✍️ 手寫過程紀錄（平板＋觸控筆） ═══════════
-   每一筆記錄時間戳。自動偵測：起筆猶豫、題中停頓（≥15s）、塗改（擦/復原/清空）、
-   尾段放棄（最後一筆到送出）。超過目標時間又 30 秒無筆跡 → 即時警示＋震動。 */
+   三個書寫面：題目畫記(q)、計算區(s)、答案區(a)。每一筆帶時間戳與顏色。
+   只認觸控筆與滑鼠——手掌/手指不會畫線、也不會誤觸捲動（兩指手勢才捲動）。
+   自動偵測：起筆猶豫、題中停頓（≥15s）、塗改（復原）、尾段放棄（最後一筆到送出）。 */
 const HES_GAP = 15000;
-const INK_COLOR = '#dfe6f2';
+const INK_W = 1.35; // 筆跡粗細（原本 2 的 2/3）
+const INK_COLORS = { k: '#1f2937', r: '#dc2626', g: '#15803d' };
+let inkColor = 'k';
 let ink = null;
 let replaying = false;
-const sessionInk = {}; // qid → { s: strokes, e: 塗改事件時間 }，僅存於本頁開啟期間
+const sessionInk = {}; // qid → { s:計算筆畫, e:塗改時間, q:題目畫記, a:答案區筆畫 }
 
-let inkEraCfg = Object.assign({ m: 'stroke', r: 16 }, S.inkcfg || {});
-function inkHTML(exam) {
-  if (exam) return `<div class="card ink-card">
-    <div class="ink-bar"><b>✍️ 計算區 <span class="warnc">考場模式</span></b><span class="ink-tools">
-      <label class="dim"><input type="checkbox" id="ink-finger" onchange="inkFingerToggle(this)"> 手指</label>
-    </span></div>
-    <div id="ink-flash" class="ink-flash" style="display:none"></div>
-    <div class="ink-scroll"><canvas id="ink-cv"></canvas></div>
-    <p class="dim ink-hint">跟考場一樣：空間就這麼多、沒有橡皮擦——寫錯就劃掉、學會排版。這也是訓練的一部分。</p>
-  </div>`;
-  return `<div class="card ink-card">
-    <div class="ink-bar"><b>✍️ 計算區</b><span class="ink-tools">
-      <button class="btn sm" id="ink-pen" onclick="inkMode('pen')">✏️ 筆</button>
-      <button class="btn sm" id="ink-era" onclick="inkMode('erase')">🧽 擦</button>
+function inkStore(qid) {
+  const st = (sessionInk[qid] = sessionInk[qid] || { s: [], e: [] });
+  st.q = st.q || []; st.a = st.a || [];
+  return st;
+}
+function inkToolsHTML() {
+  return `<span class="ink-tools">
+      <button class="btn sm inkc" id="ink-c-k" onclick="inkColorSet('k')"><span class="dot" style="background:${INK_COLORS.k}"></span>黑</button>
+      <button class="btn sm inkc" id="ink-c-r" onclick="inkColorSet('r')"><span class="dot" style="background:${INK_COLORS.r}"></span>紅</button>
+      <button class="btn sm inkc" id="ink-c-g" onclick="inkColorSet('g')"><span class="dot" style="background:${INK_COLORS.g}"></span>綠</button>
       <button class="btn sm" onclick="inkUndo()">↩ 復原</button>
       <button class="btn sm" onclick="inkExtend(320)">⬇ 加長</button>
-      <label class="dim"><input type="checkbox" id="ink-finger" onchange="inkFingerToggle(this)"> 手指</label>
-    </span></div>
-    <div id="ink-eopts" class="ink-eopts" style="display:none">
-      <span class="dim">擦除</span>
-      <button class="btn sm" id="ink-e-stroke" onclick="inkEraSet('m','stroke')">整筆</button>
-      <button class="btn sm" id="ink-e-area" onclick="inkEraSet('m','area')">區域</button>
-      <span class="dim">｜粗細</span>
-      <button class="btn sm" id="ink-e-r8" onclick="inkEraSet('r',8)">細</button>
-      <button class="btn sm" id="ink-e-r16" onclick="inkEraSet('r',16)">中</button>
-      <button class="btn sm" id="ink-e-r32" onclick="inkEraSet('r',32)">粗</button>
-      <button class="btn sm" onclick="inkClear()">🗑 全部清除</button>
-    </div>
+    </span>`;
+}
+function inkHTML(opts) {
+  const small = opts && opts.small;
+  return `<div class="card ink-card">
+    <div class="ink-bar"><b>✍️ 計算區</b>${inkToolsHTML()}</div>
     <div id="ink-flash" class="ink-flash" style="display:none"></div>
-    <div class="ink-scroll"><canvas id="ink-cv"></canvas></div>
-    <p class="dim ink-hint">筆寫字、手指上下捲動；寫到底自動加長（也可按「⬇ 加長」）。沒有主動式觸控筆才勾「手指」。這塊就是你的計算紙——別在旁邊另外打草稿，過程要留在這裡才抓得到卡點。</p>
+    <div class="ink-scroll"><canvas id="ink-cv" data-h="${small ? 240 : 0}"></canvas></div>
+    <p class="dim ink-hint">觸控筆書寫（手掌不會誤觸）、兩指上下捲動；寫錯就劃掉或按復原。過程留在這裡，AI 才分析得到你的卡點。</p>
   </div>`;
 }
-function inkStore(qid) { return (sessionInk[qid] = sessionInk[qid] || { s: [], e: [] }); }
-function inkStart(qid, t0, exam) {
-  const cv = $('#ink-cv'); if (!cv) return;
-  const st = inkStore(qid);
-  let maxY = 0;
-  for (const s of st.s) if (!s.dead) for (const p of s.pts) if (p[1] > maxY) maxY = p[1];
-  const h = exam
-    ? Math.max(460, Math.ceil(maxY + 40)) // 考場模式：固定空間（約半頁題本空白），不可加長
-    : Math.max(340, Math.round(window.innerHeight * 0.45), Math.ceil(maxY + 80));
-  ink = { qid, t0, cv, ctx: cv.getContext('2d'), mode: 'pen', cur: null, penSeen: false, warnedAt: 0, h, exam: !!exam };
-  inkSizeCanvas();
-  cv.onpointerdown = inkDown; cv.onpointermove = inkMove;
-  cv.onpointerup = cv.onpointercancel = inkUp;
-  inkMode('pen');
-  inkFingerToggle($('#ink-finger'));
+function ansZoneHTML(label) {
+  return `<div class="ans-zone"><div class="ans-zone-head">🖊 ${label || '最終答案寫這裡（寫大、寫清楚）'}</div>
+    <canvas id="ans-cv"></canvas></div>`;
 }
-function inkSizeCanvas() {
-  const { cv, ctx } = ink;
+function inkSurface(key, cv, h) {
+  const sur = { key, cv, ctx: cv.getContext('2d'), h, cur: null, touches: new Map() };
+  cv.onpointerdown = (e) => inkDown(e, sur);
+  cv.onpointermove = (e) => inkMove(e, sur);
+  cv.onpointerup = cv.onpointercancel = (e) => inkUp(e, sur);
+  cv.oncontextmenu = (e) => e.preventDefault();
+  return sur;
+}
+function inkArr(sur) {
+  const st = inkStore(ink.qid);
+  return sur.key === 'calc' ? st.s : sur.key === 'q' ? st.q : st.a;
+}
+function inkStart(qid, t0, since) {
+  const cv = $('#ink-cv'); if (!cv) return;
+  replaying = false; // 換題即解除回放鎖，避免上一題的回放把新題的筆鎖死
+  const st = inkStore(qid);
+  // 歸檔舊筆跡：同一題再次作答時不重現上次內容（模擬第二輪傳 sessT0 保留第一輪）
+  const cut = since != null ? since : t0;
+  for (const arr of [st.s, st.q, st.a]) for (const s of arr) if (!s.dead && !s.arch && s.t0 < cut) s.arch = 1;
+  let maxY = 0;
+  for (const s of st.s) if (!s.dead && !s.arch) for (const p of s.pts) if (p[1] > maxY) maxY = p[1];
+  const base = +cv.dataset.h || 0;
+  const h = base
+    ? Math.max(base, Math.ceil(maxY + 80))
+    : Math.max(340, Math.round(window.innerHeight * 0.45), Math.ceil(maxY + 80));
+  ink = { qid, t0, penAt: 0, sur: {} };
+  ink.sur.calc = inkSurface('calc', cv, h);
+  const qcv = $('#qink-cv');
+  if (qcv) ink.sur.q = inkSurface('q', qcv, 0);
+  const acv = $('#ans-cv');
+  if (acv) ink.sur.ans = inkSurface('ans', acv, 150);
+  for (const k of Object.keys(ink.sur)) inkSizeSur(ink.sur[k]);
+  inkColorSet(inkColor);
+}
+function inkSizeSur(sur) {
   const dpr = window.devicePixelRatio || 1;
-  const w = cv.parentElement.clientWidth;
-  cv.width = w * dpr; cv.height = ink.h * dpr;
-  cv.style.width = w + 'px'; cv.style.height = ink.h + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  inkRedraw();
-  if (ink.cur && ink.cur.pts && ink.cur.pts.length > 1) {
-    ctx.strokeStyle = INK_COLOR; ctx.lineWidth = 2; ctx.beginPath();
-    ctx.moveTo(ink.cur.pts[0][0], ink.cur.pts[0][1]);
-    for (let i = 1; i < ink.cur.pts.length; i++) ctx.lineTo(ink.cur.pts[i][0], ink.cur.pts[i][1]);
-    ctx.stroke();
+  let w, h;
+  if (sur.key === 'q') {
+    const wrap = sur.cv.parentElement; // .qwrap（畫記層蓋在題目文字上）
+    w = wrap.clientWidth; h = wrap.clientHeight;
+  } else {
+    w = sur.cv.parentElement.clientWidth; h = sur.h;
   }
+  sur.cv.width = Math.max(1, Math.round(w * dpr));
+  sur.cv.height = Math.max(1, Math.round(h * dpr));
+  sur.cv.style.width = w + 'px'; sur.cv.style.height = h + 'px';
+  sur.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sur.ctx.lineCap = 'round'; sur.ctx.lineJoin = 'round';
+  inkRedraw(sur);
 }
 function inkExtend(dh) {
-  if (!ink || ink.exam || ink.h >= 4000) return;
-  ink.h = Math.min(4000, ink.h + dh);
-  inkSizeCanvas();
+  if (!ink || !ink.sur.calc || ink.sur.calc.h >= 4000) return;
+  ink.sur.calc.h = Math.min(4000, ink.sur.calc.h + dh);
+  inkSizeSur(ink.sur.calc);
 }
-function inkFingerToggle(el) {
-  if (!ink) return;
-  ink.cv.style.touchAction = el && el.checked ? 'none' : 'pan-y';
+function inkColorSet(c) {
+  inkColor = c;
+  for (const k of ['k', 'r', 'g']) {
+    const b = $('#ink-c-' + k);
+    if (b) b.className = 'btn sm inkc' + (k === c ? ' active' : '');
+  }
 }
-function inkEraSet(k, v) {
-  inkEraCfg[k] = v;
-  S.inkcfg = { m: inkEraCfg.m, r: inkEraCfg.r };
-  save();
-  inkEraUI();
-}
-function inkEraUI() {
-  const on = (id, yes) => { const b = $(id); if (b) b.className = 'btn sm' + (yes ? ' active' : ''); };
-  on('#ink-e-stroke', inkEraCfg.m === 'stroke'); on('#ink-e-area', inkEraCfg.m === 'area');
-  on('#ink-e-r8', inkEraCfg.r === 8); on('#ink-e-r16', inkEraCfg.r === 16); on('#ink-e-r32', inkEraCfg.r === 32);
-}
-function inkAllow(e) {
-  if (!ink) return false;
-  if (e.pointerType === 'pen') { ink.penSeen = true; return true; }
-  if (e.pointerType === 'mouse') return true;
-  const f = $('#ink-finger');
-  return !ink.penSeen && f && f.checked;
-}
-function inkPos(e) {
-  const r = ink.cv.getBoundingClientRect();
+function inkPos(e, sur) {
+  const r = sur.cv.getBoundingClientRect();
   return [Math.round(e.clientX - r.left), Math.round(e.clientY - r.top)];
 }
-function inkDown(e) {
-  if (!inkAllow(e)) return;
+function inkDown(e, sur) {
+  if (!ink || replaying) return;
   e.preventDefault();
-  try { ink.cv.setPointerCapture(e.pointerId); } catch (_) {}
-  const [x, y] = inkPos(e);
-  if (ink.mode === 'erase') { ink.cur = { erase: true, hit: 0 }; inkErase(x, y); return; }
-  ink.cur = { t0: Date.now(), pts: [[x, y]] };
+  try { sur.cv.setPointerCapture(e.pointerId); } catch (_) {}
+  if (e.pointerType === 'touch') {
+    // 手指/手掌：永不畫線。筆活躍（正在寫、或 0.8 秒內寫過）時手掌觸點完全忽略——不殺筆、不捲動。
+    if (sur.cur || Date.now() - ink.penAt < 800) return;
+    sur.touches.set(e.pointerId, e.clientY);
+    return;
+  }
+  ink.penAt = Date.now();
+  sur.touches.clear(); // 筆落下即作廢該面已登記的手掌觸點
+  const [x, y] = inkPos(e, sur);
+  sur.cur = { t0: Date.now(), c: inkColor, pts: [[x, y]] };
 }
-function inkMove(e) {
-  if (!ink || !ink.cur || !inkAllow(e)) return;
+function inkMove(e, sur) {
+  if (!ink) return;
+  if (e.pointerType === 'touch') {
+    if (!sur.touches.has(e.pointerId)) return;
+    e.preventDefault();
+    if (Date.now() - ink.penAt < 800) return; // 筆剛寫過：手掌移動不捲動
+    const prev = sur.touches.get(e.pointerId);
+    sur.touches.set(e.pointerId, e.clientY);
+    if (sur.touches.size >= 2) {
+      const dy = (e.clientY - prev) / sur.touches.size; // 每指各觸發一次，除以指數避免加倍
+      const box = sur.key === 'calc' ? sur.cv.closest('.ink-scroll') : null;
+      if (box) {
+        const before = box.scrollTop;
+        box.scrollTop -= dy;
+        const rest = dy - (before - box.scrollTop);
+        if (rest) window.scrollBy(0, -rest); // 內框捲不動（或到底）時改捲頁面
+      } else window.scrollBy(0, -dy);
+    }
+    return;
+  }
+  if (!sur.cur) return;
   e.preventDefault();
-  const [x, y] = inkPos(e);
-  if (ink.cur.erase) { inkErase(x, y); return; }
-  const pts = ink.cur.pts; const p = pts[pts.length - 1];
+  ink.penAt = Date.now();
+  const [x, y] = inkPos(e, sur);
+  const pts = sur.cur.pts; const p = pts[pts.length - 1];
   if (Math.abs(x - p[0]) + Math.abs(y - p[1]) < 2) return;
   pts.push([x, y]);
-  const c = ink.ctx;
-  c.strokeStyle = INK_COLOR; c.lineWidth = 2;
+  const c = sur.ctx;
+  c.strokeStyle = INK_COLORS[sur.cur.c] || INK_COLORS.k; c.lineWidth = INK_W;
   c.beginPath(); c.moveTo(p[0], p[1]); c.lineTo(x, y); c.stroke();
-  if (y > ink.h - 48) inkExtend(320);
+  if (sur.key === 'calc' && y > sur.h - 48) inkExtend(320);
 }
-function inkUp() {
-  if (!ink || !ink.cur) return;
-  const cur = ink.cur; ink.cur = null;
-  if (cur.erase) { if (cur.hit) inkStore(ink.qid).e.push(Date.now()); inkRedraw(); return; }
-  if (cur.pts.length > 1) { cur.t1 = Date.now(); inkStore(ink.qid).s.push(cur); }
-}
-function distSeg2(px, py, ax, ay, bx, by) {
-  const dx = bx - ax, dy = by - ay;
-  const l2 = dx * dx + dy * dy;
-  let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
-  t = Math.max(0, Math.min(1, t));
-  const qx = ax + t * dx, qy = ay + t * dy;
-  return (px - qx) * (px - qx) + (py - qy) * (py - qy);
-}
-function inkErase(x, y) {
-  const r = inkEraCfg.r;
-  if (inkEraCfg.m === 'area') inkEraseArea(x, y, r);
-  else inkEraseStroke(x, y, r);
-  inkRedraw();
-  inkEraCursor(x, y, r);
-}
-function inkEraseStroke(x, y, r) {
-  const r2 = r * r;
-  for (const s of inkStore(ink.qid).s) {
-    if (s.dead) continue;
-    for (let i = 1; i < s.pts.length; i++) {
-      if (distSeg2(x, y, s.pts[i - 1][0], s.pts[i - 1][1], s.pts[i][0], s.pts[i][1]) < r2) {
-        s.dead = Date.now(); ink.cur.hit++;
-        break;
-      }
-    }
-  }
-}
-function inkEraseArea(x, y, r) {
-  const r2 = r * r;
-  const st = inkStore(ink.qid);
-  for (const s of st.s.slice()) {
-    if (s.dead) continue;
-    const cut = [];
-    let any = false;
-    for (let i = 1; i < s.pts.length; i++) {
-      const c = distSeg2(x, y, s.pts[i - 1][0], s.pts[i - 1][1], s.pts[i][0], s.pts[i][1]) < r2;
-      cut.push(c); if (c) any = true;
-    }
-    if (!any) continue;
-    s.dead = Date.now(); ink.cur.hit++;
-    // 沒被擦到的段落切成子筆畫留下（sub 不重複計入過程指標）
-    let run = [s.pts[0]];
-    for (let i = 1; i < s.pts.length; i++) {
-      if (cut[i - 1]) {
-        if (run.length > 1) st.s.push({ t0: s.t0, t1: s.t1, pts: run, sub: true });
-        run = [s.pts[i]];
-      } else run.push(s.pts[i]);
-    }
-    if (run.length > 1) st.s.push({ t0: s.t0, t1: s.t1, pts: run, sub: true });
-  }
-}
-function inkEraCursor(x, y, r) {
-  const c = ink.ctx;
-  c.strokeStyle = 'rgba(223, 230, 242, 0.65)';
-  c.setLineDash([4, 4]); c.lineWidth = 1;
-  c.beginPath(); c.arc(x, y, r, 0, 6.2832); c.stroke();
-  c.setLineDash([]);
+function inkUp(e, sur) {
+  if (!ink) return;
+  if (e.pointerType === 'touch') { sur.touches.delete(e.pointerId); return; }
+  if (!sur.cur) return;
+  const cur = sur.cur; sur.cur = null;
+  if (cur.pts.length > 1) { cur.t1 = Date.now(); inkArr(sur).push(cur); }
 }
 function inkUndo() {
   if (!ink) return;
   const st = inkStore(ink.qid);
-  const alive = st.s.filter((s) => !s.dead);
-  if (!alive.length) return;
-  alive[alive.length - 1].dead = Date.now();
+  let best = null;
+  for (const arr of [st.s, st.q, st.a]) {
+    for (const s of arr) if (!s.dead && !s.arch && (!best || s.t0 > best.t0)) best = s;
+  }
+  if (!best) return;
+  best.dead = Date.now();
   st.e.push(Date.now());
-  inkRedraw();
+  inkRedrawAll();
 }
-function inkClear() {
-  if (!ink) return;
-  const st = inkStore(ink.qid);
-  const alive = st.s.filter((s) => !s.dead);
-  if (!alive.length) return;
-  const now = Date.now();
-  alive.forEach((s) => (s.dead = now));
-  st.e.push(now);
-  inkRedraw();
-}
-function inkMode(m) {
-  if (ink && ink.exam && m === 'erase') return; // 考場模式沒有橡皮擦
-  if (ink) ink.mode = m;
-  const pen = $('#ink-pen'); const era = $('#ink-era');
-  if (pen) pen.className = 'btn sm' + (m === 'pen' ? ' active' : '');
-  if (era) era.className = 'btn sm' + (m === 'erase' ? ' active' : '');
-  const o = $('#ink-eopts'); if (o) o.style.display = m === 'erase' ? 'flex' : 'none';
-  if (m === 'erase') inkEraUI();
-}
-function inkDrawStroke(ctx, s) {
-  ctx.strokeStyle = INK_COLOR; ctx.lineWidth = 2;
+function inkDrawStroke(ctx, s, w) {
+  ctx.strokeStyle = INK_COLORS[s.c] || INK_COLORS.k;
+  ctx.lineWidth = w || INK_W;
   ctx.beginPath();
   ctx.moveTo(s.pts[0][0], s.pts[0][1]);
   for (let i = 1; i < s.pts.length; i++) ctx.lineTo(s.pts[i][0], s.pts[i][1]);
@@ -297,15 +251,33 @@ function inkWipe(cv, ctx) {
   const dpr = window.devicePixelRatio || 1;
   ctx.clearRect(0, 0, cv.width / dpr, cv.height / dpr);
 }
-function inkRedraw() {
-  if (!ink) return;
-  inkWipe(ink.cv, ink.ctx);
-  for (const s of inkStore(ink.qid).s) if (!s.dead) inkDrawStroke(ink.ctx, s);
+function inkRedraw(sur) {
+  if (!ink || !sur) return;
+  inkWipe(sur.cv, sur.ctx);
+  for (const s of inkArr(sur)) if (!s.dead && !s.arch) inkDrawStroke(sur.ctx, s);
+  // 進行中的筆畫也要補畫（自動加長重設 canvas 會清空 bitmap）
+  if (sur.cur && sur.cur.pts && sur.cur.pts.length > 1) inkDrawStroke(sur.ctx, sur.cur);
 }
+function inkRedrawAll() {
+  if (!ink) return;
+  for (const k of Object.keys(ink.sur)) inkRedraw(ink.sur[k]);
+}
+/* 旋轉/改變視窗大小：重算所有書寫面尺寸並重繪（否則 qink 覆蓋層會以舊尺寸蓋住按鈕） */
+let inkRszTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(inkRszTimer);
+  inkRszTimer = setTimeout(() => {
+    if (!ink || replaying) return;
+    for (const k of Object.keys(ink.sur)) inkSizeSur(ink.sur[k]);
+  }, 150);
+});
 function inkStop() {
   if (!ink) return null;
-  const { qid, t0, cv } = ink;
-  cv.onpointerdown = cv.onpointermove = cv.onpointerup = cv.onpointercancel = null;
+  const { qid, t0 } = ink;
+  for (const k of Object.keys(ink.sur)) {
+    const cv = ink.sur[k].cv;
+    cv.onpointerdown = cv.onpointermove = cv.onpointerup = cv.onpointercancel = null;
+  }
   ink = null;
   const st = inkStore(qid);
   const now = Date.now();
@@ -326,23 +298,29 @@ function inkStop() {
     n: ss.length,
   };
 }
-function inkWatch(targetMs) {
-  if (!ink) return;
-  const st = inkStore(ink.qid);
-  let lastAct = ink.t0;
-  for (const s of st.s) if (s.t1 > lastAct) lastAct = s.t1;
-  for (const t of st.e) if (t > lastAct) lastAct = t;
-  const now = Date.now();
-  if (now - ink.t0 > targetMs && now - lastAct > 30000 && now - ink.warnedAt > 30000) {
-    ink.warnedAt = now;
-    const f = $('#ink-flash');
-    if (f) {
-      f.textContent = '⚠ 已超過目標時間、且 30 秒沒有筆跡——考場上這一刻就該跳題！';
-      f.style.display = 'block';
-      setTimeout(() => { if (f) f.style.display = 'none'; }, 4500);
-    }
-    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+/* 把某書寫面（'s'=計算區 / 'a'=答案區）輸出成裁切過的 PNG base64（給 AI 批改或縮圖） */
+function inkCapture(qid, key, asDataURL) {
+  const st = sessionInk[qid];
+  if (!st) return null;
+  const arr = ((key === 'a' ? st.a : st.s) || []).filter((s) => !s.dead && !s.arch);
+  if (!arr.length) return null;
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const s of arr) for (const p of s.pts) {
+    if (p[0] < x0) x0 = p[0]; if (p[1] < y0) y0 = p[1];
+    if (p[0] > x1) x1 = p[0]; if (p[1] > y1) y1 = p[1];
   }
+  const pad = 14, w = x1 - x0 + pad * 2, h = y1 - y0 + pad * 2;
+  const scale = Math.min(2, Math.max(0.4, 1100 / w));
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(w * scale));
+  cv.height = Math.max(1, Math.round(h * scale));
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(scale, 0, 0, scale, (pad - x0) * scale, (pad - y0) * scale);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const s of arr) inkDrawStroke(ctx, s, 2.2);
+  const url = cv.toDataURL('image/png');
+  return asDataURL ? url : url.split(',')[1];
 }
 function inkSummary(p) {
   if (!p) return '';
@@ -366,6 +344,7 @@ async function inkReplay(qid, t0) {
   const flash = (msg) => { if (f) { f.textContent = msg; f.style.display = 'block'; } };
   const unflash = () => { if (f) f.style.display = 'none'; };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const gone = () => !cv.isConnected; // 換頁/換題後舊 canvas 脫離 DOM → 中止回放（replaying 由 inkStart 重設）
   const aliveAt = (t) => all.filter((s) => s.t0 <= t && (!s.dead || s.dead > t));
   inkWipe(cv, ctx);
   let prevEnd = null;
@@ -375,15 +354,17 @@ async function inkReplay(qid, t0) {
         inkWipe(cv, ctx);
         for (const a of aliveAt(s.t0)) inkDrawStroke(ctx, a);
         flash('🧽 這裡塗改了'); await sleep(600); unflash();
+        if (gone()) return;
       }
       const gap = s.t0 - prevEnd;
       if (gap >= HES_GAP) { flash(`⏸ 這裡停頓了 ${Math.round(gap / 1000)} 秒`); await sleep(1000); unflash(); }
       else await sleep(Math.min(250, gap / 8));
+      if (gone()) return;
     }
-    ctx.strokeStyle = INK_COLOR; ctx.lineWidth = 2;
+    ctx.strokeStyle = INK_COLORS[s.c] || INK_COLORS.k; ctx.lineWidth = INK_W;
     for (let i = 1; i < s.pts.length; i++) {
       ctx.beginPath(); ctx.moveTo(s.pts[i - 1][0], s.pts[i - 1][1]); ctx.lineTo(s.pts[i][0], s.pts[i][1]); ctx.stroke();
-      if (i % 6 === 0) await sleep(8);
+      if (i % 6 === 0) { await sleep(8); if (gone()) return; }
     }
     prevEnd = s.t1;
   }
@@ -401,6 +382,127 @@ function exportInk() {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+/* ═══════════ 共用 UI 基礎：modal、精簡模式、單次時間提醒、稱讚 ═══════════ */
+function modal(html, btns) {
+  modalClose();
+  const div = document.createElement('div');
+  div.id = 'modalov';
+  div.innerHTML = `<div class="modal-card">${html}<div class="modal-btns"></div></div>`;
+  document.body.appendChild(div);
+  const bx = div.querySelector('.modal-btns');
+  for (const [label, fn, cls] of btns) {
+    const b = document.createElement('button');
+    b.className = 'btn ' + (cls || '');
+    b.textContent = label;
+    b.onclick = () => { modalClose(); if (fn) fn(); };
+    bx.appendChild(b);
+  }
+}
+function modalClose() { const m = $('#modalov'); if (m) m.remove(); }
+/* 做題中隱藏上方導覽列與同步燈，把平板螢幕留給題目與計算區 */
+function sessionChrome(on) { document.body.classList.toggle('session-on', !!on); }
+/* 單次時間提醒：只在「這題理想中該答完的時間點」跳一次，其他警示全部移除 */
+function flashOnce(msg) {
+  const f = $('#q-flash') || $('#ink-flash');
+  if (f) {
+    f.textContent = msg;
+    f.style.display = 'block';
+    setTimeout(() => { if (f) f.style.display = 'none'; }, 6000);
+  }
+  if (navigator.vibrate) navigator.vibrate(200);
+}
+/* 稱讚引擎：只講真的——難題拿下、曾錯今對、比過去快。在 recordAttempt 之前呼叫。 */
+function praiseFor(q, ok, ms, target) {
+  if (!ok) return '';
+  const past = attemptsOf(q.id);
+  const msgs = [];
+  if (past.some((a) => !a.ok)) msgs.push('這題你之前錯過，這次拿下了——這就是真實的進步');
+  if (q.diff === 3) msgs.push('★★★ 難題，你把它算出來了');
+  const bestMs = past.length ? Math.min(...past.map((a) => a.ms)) : null;
+  if (bestMs && ms < bestMs) msgs.push(`比你過去最快的一次還快（${fmtSec(ms)} vs ${fmtSec(bestMs)}）`);
+  if (!msgs.length && ms <= target) msgs.push(`在目標時間內完成（${fmtSec(ms)} ≤ ${fmtSec(target)}）`);
+  if (!msgs.length) return '';
+  return `<p class="praise">🎉 ${msgs.slice(0, 2).join('；')}！</p>`;
+}
+
+/* ═══════════ 🤖 AI 批改（Anthropic API，key 只存本機） ═══════════ */
+const AI_LS = 'mathA13_aikey';
+const AI_MODEL_LS = 'mathA13_aimodel';
+function aiKey() { try { return localStorage.getItem(AI_LS) || ''; } catch (e) { return ''; } }
+function aiKeySave() {
+  const v = $('#aikey').value.trim();
+  if (!v || v.startsWith('••')) { alert('沒有變更。'); return; }
+  localStorage.setItem(AI_LS, v);
+  alert('已儲存在這台裝置。之後手寫作答按「算完了」就會自動 AI 批改。');
+  renderStats();
+}
+function aiKeyClear() { localStorage.removeItem(AI_LS); renderStats(); }
+function aiCard() {
+  return `<div class="card"><h2>🤖 AI 批改設定</h2>
+    <p class="dim">填入 Anthropic API key（sk-ant-…）後：手寫答案按「算完了」就由 AI 即時批改——認你的字、判對錯（不限定答案順序與形式）、
+    從計算過程指出<b>從哪一步開始算錯</b>、該稱讚時稱讚。key 只存在這台裝置的瀏覽器，不會進雲端也不會進備份檔。
+    沒填也能用：改為「看正解自評」模式（一樣不用打字）。</p>
+    <input id="aikey" class="ans-input" type="password" autocomplete="off" placeholder="sk-ant-..." value="${aiKey() ? '••••••••（已設定）' : ''}">
+    <div style="margin-top:8px">
+      <button class="btn primary" onclick="aiKeySave()">儲存</button>
+      ${aiKey() ? '<button class="btn" onclick="aiKeyClear()">清除 key</button>' : ''}
+    </div></div>`;
+}
+function stripTags(s) { return String(s).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
+function escH(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+// 放進 inline onclick 單引號字串裡的 id（extbank 題 id 來源不可控，要跳脫）
+function jsA(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+async function aiGradeCall(q, correctTxt, ansB64, calcB64) {
+  const content = [];
+  if (ansB64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: ansB64 } });
+  if (calcB64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: calcB64 } });
+  content.push({
+    type: 'text',
+    text: `你是嚴謹但溫暖的數學閱卷老師。以下是一位學測考生的手寫作答。
+題目：${stripTags(q.q)}
+正確答案：${correctTxt}
+${q.sol ? `參考詳解：${stripTags(q.sol)}` : ''}
+圖1＝考生手寫的「最終答案區」${calcB64 ? '，圖2＝考生的完整手寫計算過程' : '（沒有計算過程圖）'}。
+任務：
+1. 辨識答案區的最終答案（若答案區空白，從計算過程末尾找最終結果）。
+2. 判定對錯：所有等價形式都算對——多根/多解順序不同（如「5,-1」vs「-1,5」）、分數/小數、未化簡但數值相等、有沒有寫 x= 都算對。但**座標/有序數對（如 (3,4)）順序不可交換**，題目明確要求特定形式時依題目。
+3. 答錯時：對照計算過程，指出「從哪一步開始出錯」（引用他寫的式子），一句話講清楚錯在哪。
+4. 答對時：從過程裡挑一個值得保留的好習慣具體稱讚；過程若有繞遠路或危險寫法也提醒一句。
+只回傳 JSON（不要其他文字）：{"read":"辨識出的答案","correct":true或false,"firstError":"哪一步開始錯（答對時為 null）","praise":"具體稱讚（沒有就 null）","habit":"要注意的計算習慣（沒有就 null）"}`,
+  });
+  const ctrl = new AbortController();
+  const tmr = setTimeout(() => ctrl.abort(), 60000); // 60 秒沒回就放棄，退回自評
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': aiKey(),
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: (localStorage.getItem(AI_MODEL_LS) || 'claude-sonnet-5'),
+        max_tokens: 2500, // 要蓋過 adaptive thinking 的消耗，避免 JSON 被截斷
+        messages: [{ role: 'user', content }],
+      }),
+    });
+    if (!res.ok) throw new Error('API ' + res.status);
+    const j = await res.json();
+    const txt = (j.content || []).map((c) => c.text || '').join('');
+    const m = txt.match(/\{[\s\S]*\}/);
+    return JSON.parse(m ? m[0] : txt);
+  } finally { clearTimeout(tmr); }
+}
+function aiFeedbackHTML(v) {
+  if (!v) return '';
+  return `<div class="ai-fb"><p><b>🤖 AI 批改：</b>讀到你的答案「<b>${v.read != null ? escH(v.read) : '—'}</b>」→ 判定 ${v.correct ? '<span class="okc">答對 ✔</span>' : '<span class="badc">答錯 ✘</span>'}</p>
+    ${v.firstError ? `<p class="badc"><b>從這裡開始錯：</b>${escH(v.firstError)}</p>` : ''}
+    ${v.praise ? `<p class="praise">🎉 ${escH(v.praise)}</p>` : ''}
+    ${v.habit ? `<p class="warnc">✏️ 習慣提醒：${escH(v.habit)}</p>` : ''}</div>`;
+}
+
 function today() { return new Date().toISOString().slice(0, 10); }
 function addDays(dateStr, n) {
   const d = new Date(dateStr + 'T00:00:00');
@@ -449,7 +551,8 @@ function norm(s) {
     .replace(/[（]/g, '(').replace(/[）]/g, ')')
     .replace(/[，]/g, ',').replace(/[．]/g, '.')
     .replace(/[−–—]/g, '-').replace(/\s+/g, '')
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/^[a-z]=/, ''); // 「x=5」與「5」視為相同
 }
 function parseFrac(s) {
   s = norm(s);
@@ -461,6 +564,16 @@ function parseFrac(s) {
 function checkFill(input, accepted) {
   const ni = norm(input);
   if (accepted.some((a) => norm(a) === ni)) return true;
+  // 逗號分隔的多值答案（如兩根「-1,5」）：順序不拘，逐值比對。
+  // 只有「所有」接受形式都無括號才啟用——座標題常提供 '(7,0)' 與 '7,0' 兩種別名，屬有序對，不可交換。
+  const bare = (s) => !/[()]/.test(norm(s));
+  if (ni.includes(',') && bare(input) && accepted.every((a) => bare(a))) {
+    const toKey = (s) => norm(s).split(',').filter(Boolean)
+      .map((t) => { const v = parseFrac(t); return isNaN(v) ? t : String(v); })
+      .sort().join('|');
+    const ki = toKey(input);
+    if (accepted.some((a) => norm(a).includes(',') && bare(a) && toKey(a) === ki)) return true;
+  }
   const vi = parseFrac(input);
   if (!isNaN(vi)) {
     return accepted.some((a) => {
@@ -549,11 +662,76 @@ const VIEWS = {
   plan:  { label: '🗓️ 作戰計畫', fn: renderPlan },
 };
 let sessionActive = false;
-function nav(view) {
-  if (sessionActive && !confirm('目前訓練尚未完成，離開將不保留本題進度。確定離開？')) return;
+let sessionMode = null; // 'prac' | 'review' | 'mock' | 'drill'
+let sessSnap = null;    // 進場快照，用於「不保留紀錄」離開時復原
+function snapSession() { sessSnap = { att: S.attempts.length, wrong: JSON.stringify(S.wrong) }; }
+function rollbackSession() {
+  if (!sessSnap) return;
+  S.attempts.length = Math.min(S.attempts.length, sessSnap.att);
+  S.wrong = JSON.parse(sessSnap.wrong);
+  save();
+}
+function endSession() {
   sessionActive = false;
+  sessionMode = null;
   stopTicker();
   if (ink) inkStop();
+  if (drill && drill.nextTimer) { clearTimeout(drill.nextTimer); drill.nextTimer = null; }
+  qsess = null; // 讓遲到的 AI 批改回呼認得出「這一題已經結束了」
+  sessionChrome(false);
+  modalClose();
+}
+/* 中途退出：讓飼主自己選「已作答的要不要留紀錄」，不預設丟掉 */
+function exitFlow(view) {
+  const goto = view || 'home';
+  if (!sessionActive) { nav(goto); return; }
+  // 開著確認框的時間不算作答時間：按「繼續」時把計時起點往後平移
+  const pausedAt = Date.now();
+  const resume = () => {
+    const d = Date.now() - pausedAt;
+    if (sessionMode === 'mock' && mock) { mock.t0 += d; mock.tEnd += d; }
+    else if (sessionMode === 'drill' && drill) drill.t0 += d;
+    else if (qsess) qsess.t0 += d;
+  };
+  if (sessionMode === 'judging') {
+    modal('<h2>批改還沒完成</h2><p>現在離開會丟掉這一場模擬的結算與作答紀錄（已上傳的筆跡仍保存）。</p>', [
+      ['回去批改', null, 'primary'],
+      ['放棄本場結算，離開', () => { endSession(); nav(goto); }],
+    ]);
+    return;
+  }
+  if (sessionMode === 'mock') {
+    const nAns = Object.keys(mock.answers).length;
+    modal(`<h2>要中途離開模擬嗎？</h2><p>已作答 <b>${nAns}</b> 題。可以把已作答的題結算並留下紀錄（不列入模擬成績走勢），或整場不保留。</p>`, [
+      ['繼續作答', resume, 'primary'],
+      [`保留已作答的 ${nAns} 題，結算離開`, () => { if (Object.keys(mock.answers).length) { mockGrade('中途結束（保留已作答）', true); } else { endSession(); nav(goto); } }],
+      ['不保留，直接離開', () => { endSession(); nav(goto); }],
+    ]);
+    return;
+  }
+  if (sessionMode === 'prac' || sessionMode === 'review') {
+    const nDone = sessionMode === 'review'
+      ? (review ? review.i : 0)
+      : S.attempts.length - (sessSnap ? sessSnap.att : S.attempts.length);
+    modal(`<h2>要中途離開嗎？</h2><p>這一輪已完成 <b>${Math.max(0, nDone)}</b> 題（已記錄），進行中的這題不會保留。</p>`, [
+      ['繼續作答', resume, 'primary'],
+      ['保留已作答紀錄，離開', () => { endSession(); nav(goto); }],
+      ['不保留（這輪全部作廢），離開', () => { rollbackSession(); endSession(); nav(goto); }],
+    ]);
+    return;
+  }
+  // drill：結果尚未寫入，離開即不保留
+  modal('<h2>要中途離開特訓嗎？</h2><p>這一輪還沒結束，離開不會留下本輪紀錄。</p>', [
+    ['繼續', resume, 'primary'],
+    ['離開', () => { endSession(); nav(goto); }],
+  ]);
+}
+function nav(view) {
+  if (sessionActive) { exitFlow(view); return; }
+  sessionMode = null;
+  stopTicker();
+  if (ink) inkStop();
+  sessionChrome(false);
   document.querySelectorAll('nav button').forEach((b) =>
     b.classList.toggle('active', b.dataset.view === view));
   VIEWS[view].fn();
@@ -714,7 +892,7 @@ const DRILLS = {
       let q2 = rint(-9, 9) || -3;
       if (p === q2) q2 = p + rint(1, 4);
       const lo = Math.min(p, q2), hi = Math.max(p, q2);
-      return { q: `${eq(-(p + q2), p * q2)}，兩根 = ?（由小到大，逗號分隔，如 -1,5）`, kind: 'num', ans: `${lo},${hi}` };
+      return { q: `${eq(-(p + q2), p * q2)}，兩根 = ?（逗號分隔、順序不拘，如 5,-1）`, kind: 'num', ans: `${lo},${hi}` };
     } },
   frac: { name: '分數四則', desc: '機率、期望值的隱形時間殺手兼粗心大戶——答案一律最簡分數', target: 15,
     gen() {
@@ -817,50 +995,87 @@ function renderDrillMenu() {
 let drill = null;
 function startDrill(key) {
   if (!syncGate()) return;
-  drill = { key, items: [], i: 0, results: [], t0: 0 };
+  drill = { key, items: [], i: 0, results: [], t0: 0, pend: null };
   for (let i = 0; i < 12; i++) drill.items.push(DRILLS[key].gen());
   sessionActive = true;
+  sessionMode = 'drill';
   drillNext();
 }
 function drillNext() {
+  if (!drill || !sessionActive || sessionMode !== 'drill') return;
   if (drill.i >= drill.items.length) return drillDone();
   const d = DRILLS[drill.key];
   const it = drill.items[drill.i];
+  drill.pend = null;
+  drill.lock = false;
   drill.t0 = Date.now();
+  drill.qid = `drill:${drill.key}:${drill.t0}`;
   const input = it.kind === 'num'
-    ? `<input id="din" class="ans-input" inputmode="text" autocomplete="off" placeholder="答案" onkeydown="if(event.key==='Enter')drillSubmit()">
-       <button class="btn primary" onclick="drillSubmit()">送出</button>`
+    ? ansZoneHTML('答案寫這裡') + `<button class="btn primary big" onclick="drillSubmit()">✅ 算完了</button>
+       <details class="typed-opt"><summary class="dim">改用打字（選用）</summary>
+       <input id="din" class="ans-input" inputmode="text" autocomplete="off" placeholder="答案" onkeydown="if(event.key==='Enter')drillSubmit()"></details>`
     : it.opts.map((o, idx) => `<button class="btn opt" onclick="drillSubmit(${idx})">${o}</button>`).join('');
   app().innerHTML = `
     <div class="session-head">
       <span>${d.name}｜第 ${drill.i + 1} / 12 題</span>
-      <span id="dtimer" class="timer">0.0s</span>
+      <span class="shr"><span id="dtimer" class="timer">0.0s</span>
+      <button class="btn sm xbtn" onclick="exitFlow()" title="離開">✕</button></span>
     </div>
-    <div class="card qcard"><div class="qtext big">${it.q}</div>
+    <div class="card qcard"><div class="qwrap"><div class="qtext big">${it.q}</div><canvas id="qink-cv" class="qink"></canvas></div>
       <div class="ansrow">${input}</div>
       <div id="dfb"></div>
-    </div>`;
-  const inp = $('#din'); if (inp) inp.focus();
+    </div>
+    ${inkHTML({ small: true })}`;
+  sessionChrome(true);
+  inkStart(drill.qid, drill.t0);
   startTicker(() => {
     const e = (Date.now() - drill.t0) / 1000;
     const t = $('#dtimer');
-    if (t) { t.textContent = e.toFixed(1) + 's'; t.className = 'timer' + (e > d.target ? ' over' : ''); }
+    if (t) t.textContent = e.toFixed(1) + 's';
   });
 }
 function drillSubmit(optIdx) {
+  if (!drill || drill.pend || drill.lock) return;
+  drill.lock = true;
   const it = drill.items[drill.i];
   const ms = Date.now() - drill.t0;
-  let ok, given;
-  if (it.kind === 'num') { given = $('#din').value; ok = checkFill(given, [it.ans]); }
-  else { given = it.opts[optIdx]; ok = optIdx === it.ans; }
+  stopTicker();
+  const proc = inkStop();
+  document.querySelectorAll('.ansrow button, .ansrow input').forEach((b) => (b.disabled = true));
+  const typed = $('#din') ? $('#din').value.trim() : '';
+  const proceed = () => {
+    if (it.kind !== 'num') { drillFinish(optIdx === it.ans, it.opts[optIdx], ms, proc); return; }
+    if (typed) { drillFinish(checkFill(typed, [it.ans]), typed, ms, proc); return; }
+    // 手寫作答：秀正解 → 自評對錯（不需要鍵盤）
+    drill.pend = { ms, proc };
+    $('#dfb').innerHTML = `<div class="judge-box"><p>正解：<b class="big accent">${it.ans}</b>　對照你答案區寫的——一樣嗎？</p>
+      <button class="btn primary" onclick="drillJudge(true)">✓ 我對了</button>
+      <button class="btn err" onclick="drillJudge(false)">✗ 我錯了</button></div>`;
+  };
+  if (ms >= 360000) {
+    modal(`<h2>⏸ 這題用了 ${fmtSec(ms)}</h2><p>是不是有中途離開座位？有的話這題不列入本輪，避免污染速度數據。</p>`, [
+      ['有離開，這題不列入', () => { drill.pend = null; drill.lock = false; drill.items[drill.i] = DRILLS[drill.key].gen(); drillNext(); }],
+      ['沒有離開，正常記錄', proceed],
+    ]);
+  } else proceed();
+}
+function drillJudge(ok) {
+  if (!drill || !drill.pend) return;
+  const { ms, proc } = drill.pend;
+  drill.pend = null;
+  const it = drill.items[drill.i];
+  drillFinish(ok, ok ? String(it.ans) : '（手寫，自評錯）', ms, proc);
+}
+function drillFinish(ok, given, ms, proc) {
+  const it = drill.items[drill.i];
   const ansTxt = it.kind === 'num' ? it.ans : it.opts[it.ans];
   drill.results.push({ ok, ms, q: it.q, ans: ansTxt, given });
-  stopTicker();
+  syncInk(drill.qid, drill.t0, Object.assign({ mode: 'drill', ok }, proc || {}));
   const fb = $('#dfb');
   if (ok) {
     fb.innerHTML = `<p class="ok">✔ 正確（${(ms / 1000).toFixed(1)}s）</p>`;
     drill.i++;
-    setTimeout(drillNext, 500);
+    drill.nextTimer = setTimeout(drillNext, 500); // endSession 會清掉，避免退出後殭屍題復活
   } else {
     fb.innerHTML = `<p class="bad">✘ 錯了，正確答案：<b>${ansTxt}</b></p>
       <button class="btn primary" onclick="drill.i++;drillNext()">下一題</button>`;
@@ -868,6 +1083,9 @@ function drillSubmit(optIdx) {
 }
 function drillDone() {
   sessionActive = false;
+  sessionMode = null;
+  sessionChrome(false);
+  if (!drill.results.length) { nav('drill'); return; }
   const d = DRILLS[drill.key];
   const times = drill.results.map((r) => r.ms);
   const med = median(times);
@@ -904,7 +1122,7 @@ function drillDone() {
     const slow = r.ok && r.ms > med * 2 && r.ms > 3000;
     return `<tr>
       <td>${i + 1}</td><td>${r.q}</td>
-      <td>${r.ok ? '<span class="okc">✔</span>' : `<span class="badc">✘ ${r.given || '（空白）'}</span>`}</td>
+      <td>${r.ok ? '<span class="okc">✔</span>' : `<span class="badc">✘ ${escH(r.given || '（空白）')}</span>`}</td>
       <td><b>${r.ans}</b></td>
       <td class="${slow ? 'warnc' : ''}" style="font-variant-numeric:tabular-nums">${(r.ms / 1000).toFixed(1)}s${slow ? ' ⚠' : ''}</td></tr>`;
   }).join('');
@@ -922,7 +1140,7 @@ function drillDone() {
       ${hist.length > 1 ? `<p class="dim">近 ${Math.min(6, hist.length)} 輪走勢：${trend}</p>` : ''}
     </div>
     ${wrongs.length ? `<div class="card warn"><h2>✘ 錯的 ${wrongs.length} 題——花 30 秒看懂它們再走</h2>
-      <ul>${wrongs.map((r) => `<li>${r.q}　你答 <span class="badc">${r.given || '（空白）'}</span>，正解 <b>${r.ans}</b>（${(r.ms / 1000).toFixed(1)}s${r.ms < med ? '——比你的中位數還快，十之八九是搶快' : ''}）</li>`).join('')}</ul></div>` : ''}
+      <ul>${wrongs.map((r) => `<li>${r.q}　你答 <span class="badc">${escH(r.given || '（空白）')}</span>，正解 <b>${r.ans}</b>（${(r.ms / 1000).toFixed(1)}s${r.ms < med ? '——比你的中位數還快，十之八九是搶快' : ''}）</li>`).join('')}</ul></div>` : ''}
     ${slows.length ? `<div class="card"><h2>⚠ 卡頓題 ${slows.length} 題（吃掉全輪 ${slowShare}% 的時間）</h2>
       <p class="dim">耗時超過自己中位數兩倍的題——這幾種數字組合就是你「還沒自動化」的精確位置，下一輪特別注意它們有沒有變快：</p>
       <ul>${slows.map((r) => `<li>${r.q}　<b class="warnc">${(r.ms / 1000).toFixed(1)}s</b></li>`).join('')}</ul></div>` : ''}
@@ -943,7 +1161,7 @@ function renderPracConfig() {
   }).join('');
   app().innerHTML = `
     <h1>🎯 主題刷題</h1>
-    <p>每題帶碼表：計時條變<span class="warnc">黃</span>代表到達目標時間、變<span class="badc">紅</span>代表超時 1.5 倍（考場上這題該跳了）。答錯要選錯因——錯因數據決定你之後練什麼。</p>
+    <p>每題帶碼表；到達「理想中該答完的時間點」會提醒一次（就一次，不疲勞轟炸）。答錯要選錯因——錯因數據決定你之後練什麼。</p>
     <div class="card">
       <h3>單元（預設全選）</h3>
       <div class="chips" id="topicChips">${chips}</div>
@@ -974,6 +1192,8 @@ function startPrac() {
   pool = shuffle(pool).sort((a, b) => attemptsOf(a.id).length - attemptsOf(b.id).length);
   prac = { queue: pool.slice(0, cnt), i: 0, results: [], mode: 'practice' };
   sessionActive = true;
+  sessionMode = 'prac';
+  snapSession();
   pracNext();
 }
 function pracNext() {
@@ -989,19 +1209,28 @@ function pracNext() {
 }
 function pracDone() {
   sessionActive = false;
-  const r = prac.results;
+  sessionMode = null;
+  sessionChrome(false);
+  const all = prac.results;
+  const r = all.filter((x) => !x.excluded);
   const okN = r.filter((x) => x.ok).length;
   const slowOk = r.filter((x) => x.ok && x.ms > x.target * 1.5).length;
-  const rows = r.map((x, i) => {
+  const hardWins = all.filter((x, i) => !x.excluded && x.ok && prac.queue[i].diff === 3).length;
+  const rows = all.map((x, i) => {
     const q = prac.queue[i];
+    if (x.excluded) return `<tr><td>${TOPICS[q.topic]}</td><td colspan="3" class="dim">（中途離開，未列入紀錄）</td></tr>`;
     return `<tr><td>${TOPICS[q.topic]}</td><td>${x.ok ? '✔' : '✘'}</td>
       <td class="${x.ms > x.target ? 'badc' : 'okc'}">${fmtSec(x.ms)} / ${fmtSec(x.target)}</td>
       <td>${x.err || '—'}</td></tr>`;
   }).join('');
+  const cheer = r.length && okN === r.length ? '整輪全對——這種穩定度就是考場要的！'
+    : hardWins ? `其中 ${hardWins} 題是★★★難題你也拿下了，難題手感正在長出來。`
+    : r.length && okN >= Math.ceil(r.length * 0.7) ? '大部分都拿下了，把錯的釘進錯題本，這輪就值回票價。' : '';
   app().innerHTML = `
     <h1>刷題結果</h1>
     <div class="card">
       <p class="big">答對 <b>${okN} / ${r.length}</b>${slowOk ? `，其中 <b class="warnc">${slowOk} 題「對但超時」</b>（考場上等於失分，已加入錯題本重練速度）` : ''}</p>
+      ${cheer ? `<p class="praise">🎉 ${cheer}</p>` : ''}
       <table class="tbl"><tr><th>單元</th><th>結果</th><th>耗時/目標</th><th>錯因</th></tr>${rows}</table>
       <button class="btn primary" onclick="nav('prac')">再刷一輪</button>
       <button class="btn" onclick="nav('stats')">看數據</button>
@@ -1011,7 +1240,7 @@ function pracDone() {
 /* ═══════════ 單題渲染（刷題與錯題重測共用） ═══════════ */
 let qsess = null;
 function renderQuestion(q, cfg) {
-  qsess = { q, cfg, t0: Date.now(), chosen: new Set() };
+  qsess = { q, cfg, t0: Date.now(), warned: false, locked: false };
   const target = qTarget(q);
   let ansUI;
   if (q.type === 'single') {
@@ -1022,70 +1251,116 @@ function renderQuestion(q, cfg) {
       `<label class="opt block check"><input type="checkbox" value="${i}"> (${i + 1}) ${o}</label>`).join('')
       + `<button class="btn primary" onclick="qSubmit()">送出（多選）</button>`;
   } else {
-    ansUI = `<input id="qin" class="ans-input" autocomplete="off" placeholder="輸入答案（分數用 a/b）" onkeydown="if(event.key==='Enter')qSubmit()">
-      <button class="btn primary" onclick="qSubmit()">送出</button>`;
+    ansUI = ansZoneHTML() + `<button class="btn primary big" onclick="qSubmit()">✅ 算完了，開始批改</button>
+      <details class="typed-opt"><summary class="dim">改用打字（選用）</summary>
+      <input id="qin" class="ans-input" autocomplete="off" placeholder="輸入答案（分數用 a/b）" onkeydown="if(event.key==='Enter')qSubmit()"></details>`;
   }
   app().innerHTML = `
     <div class="session-head">
       <span>${cfg.head}｜${TOPICS[q.topic]}${q.src ? `｜<b class="accent">${q.src}</b>` : ''}｜${'★'.repeat(q.diff)}${'☆'.repeat(3 - q.diff)}｜目標 ${fmtSec(target)}</span>
-      <span id="qtimer" class="timer">00:00</span>
+      <span class="shr"><span id="qtimer" class="timer">00:00</span>
+      <button class="btn sm xbtn" onclick="exitFlow()" title="離開">✕</button></span>
     </div>
     <div class="timebar"><div id="tbfill" class="timebar-fill"></div></div>
+    <div id="q-flash" class="ink-flash" style="display:none"></div>
     <div class="card qcard">
-      <div class="qtext">${q.q}</div>
+      <div class="qwrap"><div class="qtext">${q.q}</div><canvas id="qink-cv" class="qink"></canvas></div>
       <div class="ansarea">${ansUI}</div>
       <div id="qfb"></div>
     </div>
     ${inkHTML()}`;
-  const inp = $('#qin'); if (inp) inp.focus();
+  sessionChrome(true);
   inkStart(q.id, qsess.t0);
   startTicker(() => {
     const e = Date.now() - qsess.t0;
     const t = $('#qtimer'); const f = $('#tbfill');
     if (!t) return;
     t.textContent = fmtClock(e);
-    const ratio = e / target;
-    f.style.width = Math.min(100, ratio * 100) + '%';
-    f.className = 'timebar-fill' + (ratio > 1.5 ? ' red' : ratio > 1 ? ' yellow' : '');
-    t.className = 'timer' + (ratio > 1.5 ? ' over' : ratio > 1 ? ' warn' : '');
-    inkWatch(target);
+    f.style.width = Math.min(100, (e / target) * 100) + '%';
+    if (!qsess.warned && e >= target) {
+      qsess.warned = true;
+      flashOnce('⏰ 理想上這題現在該答完了——還沒有路就準備收尾或跳題');
+    }
   });
 }
 function qSubmit(optIdx) {
-  const { q } = qsess;
+  if (!qsess || qsess.locked) return;
+  qsess.locked = true;
   const ms = Date.now() - qsess.t0;
-  const target = qTarget(q);
+  qsess.ms = ms;
   stopTicker();
   qsess.proc = inkStop();
-  syncInk(q.id, qsess.t0, qsess.proc);
-  let ok, yourAns;
-  if (q.type === 'single') {
-    ok = optIdx === q.ans[0];
-    yourAns = `(${optIdx + 1})`;
-  } else if (q.type === 'multi') {
-    const chosen = [...document.querySelectorAll('.ansarea input:checked')].map((i) => +i.value);
-    ok = chosen.length === q.ans.length && q.ans.every((a) => chosen.includes(a));
-    yourAns = chosen.length ? chosen.map((c) => `(${c + 1})`).join('') : '（未選）';
-  } else {
-    const v = $('#qin').value;
-    ok = checkFill(v, q.ans);
-    yourAns = v || '（空白）';
-  }
-  const correctTxt = q.type === 'fill' ? q.ans[0] : q.ans.map((a) => `(${a + 1})`).join('');
-  const overtime = ok && ms > target * 1.5;
-  // 鎖住作答區
   document.querySelectorAll('.ansarea button, .ansarea input').forEach((b) => (b.disabled = true));
+  const go = () => qGrade(optIdx);
+  if (ms >= 360000) {
+    modal(`<h2>⏸ 這題用了 ${fmtSec(ms)}</h2><p>超過 6 分鐘——是不是有中途離開座位？有的話這筆不列入紀錄，避免污染數據（詳解照樣看得到）。</p>`, [
+      ['有離開，這筆不列入', () => { qsess.exclude = true; go(); }],
+      ['沒有離開，正常記錄', go],
+    ]);
+  } else go();
+}
+function qGrade(optIdx) {
+  const { q } = qsess;
+  if (q.type === 'single') { qsess.yourAns = `(${optIdx + 1})`; qResolve(optIdx === q.ans[0]); return; }
+  if (q.type === 'multi') {
+    const chosen = [...document.querySelectorAll('.ansarea input:checked')].map((i) => +i.value);
+    qsess.yourAns = chosen.length ? chosen.map((c) => `(${c + 1})`).join('') : '（未選）';
+    qResolve(chosen.length === q.ans.length && q.ans.every((a) => chosen.includes(a)));
+    return;
+  }
+  // 填充：打字（選用）自動判；手寫 → AI 批改，沒設 AI 就看正解自評。都不用鍵盤。
+  const typed = $('#qin') ? $('#qin').value.trim() : '';
+  if (typed) { qsess.yourAns = typed; qResolve(checkFill(typed, q.ans)); return; }
+  qsess.yourAns = '（手寫作答）';
+  const ansB64 = inkCapture(q.id, 'a');
+  const calcB64 = inkCapture(q.id, 's');
+  if (aiKey() && (ansB64 || calcB64)) {
+    $('#qfb').innerHTML = '<p class="dim">🤖 AI 批改中…（認字、對答案、檢查過程哪裡開始錯）</p>';
+    const sess = qsess; // 綁定本題：離開或換題後，遲到的回應直接丟棄
+    aiGradeCall(q, q.ans.join(' 或 '), ansB64, calcB64)
+      .then((v) => { if (qsess !== sess) return; qsess.ai = v; qShowJudge(true); })
+      .catch(() => { if (qsess !== sess) return; qShowJudge(false); });
+  } else qShowJudge(false);
+}
+function qShowJudge(hasAI) {
+  const { q } = qsess;
+  const v = qsess.ai;
+  const peek = `<div class="sol"><p>正解：<b class="big">${q.ans[0]}</b></p></div>`;
+  if (hasAI && v) {
+    $('#qfb').innerHTML = `${aiFeedbackHTML(v)}${peek}
+      <p class="dim">AI 判得對就繼續；判錯了可以改判。</p>
+      <button class="btn primary" onclick="qResolve(${!!v.correct})">${v.correct ? '✓ 沒錯，我答對了' : '✗ 對，我答錯了'}——繼續</button>
+      <button class="btn" onclick="qResolve(${!v.correct})">改判：其實我${v.correct ? '錯了' : '對了'}</button>`;
+  } else {
+    $('#qfb').innerHTML = `${peek}
+      <p><b>對照你答案區寫的——答對了嗎？</b><span class="dim">（等價形式都算對：多根順序不同、沒化簡、有沒有寫 x= 都算；座標類順序要照題目）</span></p>
+      <button class="btn primary" onclick="qResolve(true)">✓ 我對了</button>
+      <button class="btn err" onclick="qResolve(false)">✗ 我錯了</button>`;
+  }
+}
+function qResolve(ok) {
+  const { q } = qsess;
+  const ms = qsess.ms;
+  const target = qTarget(q);
+  const overtime = ok && ms > target * 1.5;
+  const correctTxt = q.type === 'fill' ? q.ans[0] : q.ans.map((a) => `(${a + 1})`).join('');
+  // 筆跡一律上傳（珍貴分析資料）；被排除的標記 excluded，統計時可濾掉
+  syncInk(q.id, qsess.t0, Object.assign(
+    { mode: qsess.cfg.review ? 'review' : 'practice', ok, excluded: !!qsess.exclude, ai: qsess.ai || null }, qsess.proc || {}));
   const fb = $('#qfb');
   const solBlock = `
     <div class="sol">
-      <p>${ok ? '<span class="ok">✔ 答對</span>' : `<span class="bad">✘ 答錯</span>（你的答案：${yourAns}）`}
+      <p>${ok ? '<span class="ok">✔ 答對</span>' : `<span class="bad">✘ 答錯</span>（你的答案：${escH(qsess.yourAns)}）`}
          ｜正解：<b>${correctTxt}</b>｜耗時 ${fmtSec(ms)}（目標 ${fmtSec(target)}）
          ${overtime ? '<span class="warnc"><b>⚠ 對但超時 1.5 倍——考場上這題等於沒拿到</b></span>' : ''}</p>
+      ${ok ? praiseFor(q, ok, ms, target) : ''}
+      ${qsess.ai ? aiFeedbackHTML(qsess.ai) : ''}
       <p><b>詳解：</b>${q.sol}</p>
       ${q.tip ? `<p class="tip">💡 <b>快解：</b>${q.tip}</p>` : ''}
       ${teachBlock(q.id)}
       ${inkSummary(qsess.proc)}
-      ${qsess.proc && qsess.proc.n ? `<button class="btn sm" onclick="inkReplay('${q.id}', ${qsess.t0})">▶ 回放解題過程</button>` : ''}
+      ${qsess.proc && qsess.proc.n ? `<button class="btn sm" onclick="inkReplay('${jsA(q.id)}', ${qsess.t0})">▶ 回放解題過程</button>` : ''}
+      ${qsess.exclude ? '<p class="warnc">（依你的選擇，這筆不列入紀錄）</p>' : ''}
     </div>`;
   if (!ok) {
     fb.innerHTML = solBlock + `
@@ -1101,9 +1376,11 @@ function qSubmit(optIdx) {
 }
 function qFinish(ok, ms, err) {
   const { q, cfg } = qsess;
-  if (cfg.review) reviewResult(q.id, ok);
-  else recordAttempt(q, ok, ms, err, prac ? prac.mode : 'practice', qsess.proc);
-  cfg.onDone({ ok, ms, err, target: qTarget(q) });
+  if (!qsess.exclude) {
+    if (cfg.review) reviewResult(q.id, ok);
+    else recordAttempt(q, ok, ms, err, prac ? prac.mode : 'practice', qsess.proc);
+  }
+  cfg.onDone({ ok, ms, err, target: qTarget(q), excluded: !!qsess.exclude });
 }
 
 /* ═══════════ 模擬實戰 ═══════════ */
@@ -1145,9 +1422,11 @@ function startMock() {
   const paper = buildPaper();
   mock = {
     paper, orig: paper.slice(), i: 0, round: 1, skipped: [],
-    answers: {}, times: {}, proc: {}, tEnd: Date.now() + 36 * 60 * 1000, t0: 0,
+    answers: {}, times: {}, proc: {}, exclude: {}, judge: {},
+    tEnd: Date.now() + 36 * 60 * 1000, t0: 0, qwarned: false, sessT0: Date.now(),
   };
   sessionActive = true;
+  sessionMode = 'mock';
   mockNext();
 }
 function mockNext() {
@@ -1169,6 +1448,8 @@ function mockQ() {
   const q = mock.paper[mock.i];
   const cap = qTarget(q);
   mock.t0 = Date.now();
+  mock.qwarned = false;
+  mock.qlock = false;
   let ansUI;
   if (q.type === 'single') {
     ansUI = q.opts.map((o, i) => `<button class="btn opt block" onclick="mockAns(${i})">(${i + 1}) ${o}</button>`).join('');
@@ -1176,55 +1457,81 @@ function mockQ() {
     ansUI = q.opts.map((o, i) => `<label class="opt block check"><input type="checkbox" value="${i}"> (${i + 1}) ${o}</label>`).join('')
       + `<button class="btn primary" onclick="mockAns()">送出此題</button>`;
   } else {
-    ansUI = `<input id="qin" class="ans-input" autocomplete="off" placeholder="答案（分數用 a/b）" onkeydown="if(event.key==='Enter')mockAns()">
-      <button class="btn primary" onclick="mockAns()">送出此題</button>`;
+    ansUI = ansZoneHTML() + `<button class="btn primary big" onclick="mockAns()">✅ 算完了 → 下一題</button>
+      <details class="typed-opt"><summary class="dim">改用打字（選用）</summary>
+      <input id="qin" class="ans-input" autocomplete="off" placeholder="答案（分數用 a/b）" onkeydown="if(event.key==='Enter')mockAns()"></details>`;
   }
   app().innerHTML = `
     <div class="session-head">
       <span>第${mock.round === 1 ? '一' : '二'}輪｜第 ${mock.i + 1} / ${mock.paper.length} 題｜建議 ≤ ${fmtSec(cap)}</span>
-      <span id="mclock" class="timer">${fmtClock(mock.tEnd - Date.now())}</span>
+      <span class="shr"><span id="mclock" class="timer">${fmtClock(mock.tEnd - Date.now())}</span>
+      <button class="btn sm xbtn" onclick="exitFlow()" title="離開">✕</button></span>
     </div>
+    <div id="q-flash" class="ink-flash" style="display:none"></div>
     <div class="card qcard">
-      <div class="qtext">${q.q}</div>
+      <div class="qwrap"><div class="qtext">${q.q}</div><canvas id="qink-cv" class="qink"></canvas></div>
       <div class="ansarea">${ansUI}</div>
       <div class="mock-actions">
         ${mock.round === 1 ? `<button class="btn skip" onclick="mockSkip()">跳過 → 第二輪</button>` : `<button class="btn skip" onclick="mockGiveup()">放棄此題</button>`}
         <span id="mqtimer" class="dim"></span>
       </div>
     </div>
-    ${inkHTML(true)}`;
-  const inp = $('#qin'); if (inp) inp.focus();
-  inkStart(q.id, mock.t0, true);
+    ${inkHTML()}`;
+  sessionChrome(true);
+  inkStart(q.id, mock.t0, mock.sessT0); // 第二輪回頭時保留第一輪筆跡；更早的舊筆跡歸檔
   startTicker(() => {
     const left = mock.tEnd - Date.now();
     if (left <= 0) { mockGrade('時間到！'); return; }
-    const c = $('#mclock'); if (c) { c.textContent = fmtClock(left); c.className = 'timer' + (left < 5 * 60 * 1000 ? ' over' : ''); }
+    const c = $('#mclock'); if (c) c.textContent = fmtClock(left);
     const e = Date.now() - mock.t0;
     const t = $('#mqtimer');
-    if (t) t.innerHTML = e > cap ? `<span class="badc">本題已 ${fmtSec(e)}，超過建議上限——停損！</span>` : `本題 ${fmtSec(e)}`;
-    inkWatch(cap);
+    if (t) t.textContent = `本題 ${fmtSec(e)}`;
+    if (!mock.qwarned && e >= cap) {
+      mock.qwarned = true;
+      flashOnce('⏰ 這題理想中該答完了——考場上此刻就該收尾或跳題');
+    }
   });
 }
 function mockInkDone(qid) {
   const t0 = mock.t0;
   const p = inkStop();
   if (p) mock.proc[qid] = mergeProc(mock.proc[qid], p);
-  syncInk(qid, t0, p);
+  syncInk(qid, t0, Object.assign({ mode: 'mock' }, p || {}));
 }
 function mockAns(optIdx) {
+  if (!mock || mock.qlock || Date.now() - mock.t0 < 350) return; // 350ms 內＝double-tap 殘留，忽略
+  mock.qlock = true;
   const q = mock.paper[mock.i];
+  const elapsed = Date.now() - mock.t0;
   let ans;
   if (q.type === 'single') ans = { type: 'single', v: optIdx };
   else if (q.type === 'multi') ans = { type: 'multi', v: [...document.querySelectorAll('.ansarea input:checked')].map((i) => +i.value) };
-  else ans = { type: 'fill', v: $('#qin').value };
-  mock.answers[q.id] = ans;
-  mock.times[q.id] = (mock.times[q.id] || 0) + (Date.now() - mock.t0);
-  mockInkDone(q.id);
-  mock.i++;
-  stopTicker();
-  mockNext();
+  else {
+    const typed = $('#qin') ? $('#qin').value.trim() : '';
+    ans = typed ? { type: 'fill', v: typed } : { type: 'inkfill' };
+  }
+  const commit = (excluded) => {
+    if (excluded) mock.exclude[q.id] = 1;
+    mock.answers[q.id] = ans;
+    mock.times[q.id] = (mock.times[q.id] || 0) + elapsed;
+    mockInkDone(q.id);
+    mock.i++;
+    stopTicker();
+    mockNext();
+  };
+  if (elapsed >= 360000) {
+    stopTicker();
+    modal(`<h2>⏸ 這題用了 ${fmtSec(elapsed)}</h2><p>是不是有中途離開座位？有的話這題不列入成績與數據，避免污染。</p>`, [
+      ['有離開，這題不列入', () => commit(true)],
+      ['沒有離開，正常記錄', () => commit(false)],
+    ]);
+    return;
+  }
+  commit(false);
 }
 function mockSkip() {
+  if (!mock || mock.qlock || Date.now() - mock.t0 < 350) return;
+  mock.qlock = true;
   const q = mock.paper[mock.i];
   mock.times[q.id] = (mock.times[q.id] || 0) + (Date.now() - mock.t0);
   mockInkDone(q.id);
@@ -1234,6 +1541,8 @@ function mockSkip() {
   mockNext();
 }
 function mockGiveup() {
+  if (!mock || mock.qlock || Date.now() - mock.t0 < 350) return;
+  mock.qlock = true;
   const q = mock.paper[mock.i];
   mock.times[q.id] = (mock.times[q.id] || 0) + (Date.now() - mock.t0);
   mockInkDone(q.id);
@@ -1241,11 +1550,87 @@ function mockGiveup() {
   stopTicker();
   mockNext();
 }
-function mockGrade(reason) {
+function mockGrade(reason, partial) {
   stopTicker();
   if (ink) mockInkDone(ink.qid);
+  modalClose();
+  mock.reason = reason;
+  mock.partial = !!partial;
+  // 完整模擬＝整份原卷（含未作答）；中途保留＝只結算作答過的題。排除「離開座位」題。
+  mock.graded = (partial ? mock.orig.filter((q) => mock.answers[q.id]) : mock.orig)
+    .filter((q) => !mock.exclude[q.id]);
+  const inkfills = mock.graded.filter((q) => { const a = mock.answers[q.id]; return a && a.type === 'inkfill'; });
+  if (inkfills.length) {
+    // 批改期間紀錄還沒寫入——維持 session 守衛，nav 會先確認，避免一點就整場蒸發
+    sessionActive = true;
+    sessionMode = 'judging';
+    return mockJudgePanel(inkfills);
+  }
+  mockFinal();
+}
+/* 手寫填充題的批改面板：AI 先批（有 key 時），人工可改判 */
+function mockJudgePanel(list) {
+  sessionChrome(false);
+  mock.toJudge = list;
+  const items = list.map((q, i) => {
+    const img = inkCapture(q.id, 'a', true) || inkCapture(q.id, 's', true);
+    return `<div class="judge-item">
+      <div class="judge-img">${img ? `<img src="${img}" alt="手寫答案">` : '<span class="dim">（答案區空白）</span>'}</div>
+      <div class="judge-info">
+        <p class="dim">${TOPICS[q.topic]}｜正解：<b class="big">${q.ans[0]}</b></p>
+        <div id="jai-${i}"></div>
+        <button class="btn sm" id="jok-${i}" onclick="mockJudgeSet(${i}, true)">✓ 對</button>
+        <button class="btn sm" id="jbad-${i}" onclick="mockJudgeSet(${i}, false)">✗ 錯</button>
+      </div>
+    </div>`;
+  }).join('');
+  app().innerHTML = `
+    <h1>📝 批改手寫題（${list.length} 題）</h1>
+    <div class="card">
+      <p>跟考場一樣：寫完才對答案。逐題對照你的手寫答案與正解（等價形式、順序不同都算對），按 ✓ 或 ✗。
+      ${aiKey() ? '' : '<span class="dim">（到「📊 數據」頁設定 AI key 後，這一步會由 AI 自動先批＋標出過程錯在哪）</span>'}</p>
+      ${items}
+      <p id="jmsg" class="dim"></p>
+      <button class="btn primary big" onclick="mockJudgeDone()">完成批改，看結果</button>
+    </div>`;
+  if (aiKey()) mockAIJudge();
+}
+function mockJudgeSet(i, ok) {
+  const q = mock.toJudge[i];
+  mock.judge[q.id] = ok;
+  const a = $('#jok-' + i), b = $('#jbad-' + i);
+  if (a) a.className = 'btn sm' + (ok ? ' active' : '');
+  if (b) b.className = 'btn sm' + (!ok ? ' active' : '');
+}
+async function mockAIJudge() {
+  const m = mock; // 綁定本場：使用者若放棄離開再開新模擬，遲到的回應不可寫進新場
+  const msgEl = $('#jmsg');
+  m.aiv = m.aiv || {};
+  for (let i = 0; i < m.toJudge.length; i++) {
+    if (mock !== m || sessionMode !== 'judging') return;
+    const q = m.toJudge[i];
+    if (msgEl) msgEl.textContent = `🤖 AI 批改中… ${i + 1} / ${m.toJudge.length}`;
+    try {
+      const v = await aiGradeCall(q, q.ans.join(' 或 '), inkCapture(q.id, 'a'), inkCapture(q.id, 's'));
+      if (mock !== m || sessionMode !== 'judging') return;
+      m.aiv[q.id] = v;
+      const box = $('#jai-' + i);
+      if (box) box.innerHTML = aiFeedbackHTML(v);
+      if (m.judge[q.id] === undefined) mockJudgeSet(i, !!v.correct);
+    } catch (e) { /* 單題 AI 失敗就留給人工批 */ }
+  }
+  if (mock === m && msgEl && msgEl.isConnected) msgEl.textContent = 'AI 批改完成——每題確認 ✓/✗（可改判），再看結果。';
+}
+function mockJudgeDone() {
+  const missing = mock.toJudge.filter((q) => mock.judge[q.id] === undefined);
+  if (missing.length) { const m = $('#jmsg'); if (m) m.textContent = `還有 ${missing.length} 題沒批——每題要按 ✓ 或 ✗。`; return; }
+  mockFinal();
+}
+function mockFinal() {
   sessionActive = false;
-  const paper = mock.orig; // 完整原卷（含未作答的題）
+  sessionMode = null;
+  sessionChrome(false);
+  const paper = mock.graded;
   let okN = 0;
   const detail = paper.map((q) => {
     const a = mock.answers[q.id];
@@ -1255,33 +1640,50 @@ function mockGrade(reason) {
     if (a) {
       if (a.type === 'single') { ok = a.v === q.ans[0]; yourAns = `(${a.v + 1})`; }
       else if (a.type === 'multi') { ok = a.v.length === q.ans.length && q.ans.every((x) => a.v.includes(x)); yourAns = a.v.length ? a.v.map((c) => `(${c + 1})`).join('') : '（未選）'; }
+      else if (a.type === 'inkfill') { ok = !!mock.judge[q.id]; yourAns = '（手寫）'; }
       else { ok = checkFill(a.v, q.ans); yourAns = a.v || '（空白）'; }
     }
     if (ok) okN++;
     recordAttempt(q, ok, ms, ok ? (ms > target * 1.5 ? '超時' : null) : '概念不熟', 'mock', mock.proc[q.id] || null);
     return { q, ok, ms, target, yourAns, answered: !!a };
   });
-  const acc = okN / paper.length;
+  const acc = paper.length ? okN / paper.length : 0;
   const overStuck = detail.filter((d) => !d.ok && d.answered && d.ms > d.target * 1.5);
   const slowOk = detail.filter((d) => d.ok && d.ms > d.target * 1.5);
   const unused = mock.tEnd - Date.now();
-  S.mocks.push({ d: today(), ok: okN, n: paper.length, acc });
+  if (!mock.partial) S.mocks.push({ d: today(), ok: okN, n: paper.length, acc });
   save();
+  // 逐題鼓勵：只講有真實依據的（曾錯今對、難題拿下、目標內完成）
+  const cheers = detail.filter((d) => d.ok).map((d) => {
+    const past = S.attempts.filter((x) => x.qid === d.q.id).slice(0, -1);
+    const bits = [];
+    if (past.some((x) => !x.ok)) bits.push('之前錯過、這次拿下');
+    if (d.q.diff === 3) bits.push('★★★難題成功解出');
+    if (d.ms && d.ms <= d.target) bits.push('目標時間內完成');
+    return bits.length ? `<li>${TOPICS[d.q.topic]}：${bits.join('、')} 🎉</li>` : '';
+  }).filter(Boolean).join('');
+  const aiNotes = mock.aiv ? paper.map((q) => {
+    const v = mock.aiv[q.id];
+    return v && v.firstError ? `<li>${TOPICS[q.topic]}：<b>從這裡開始錯</b>——${v.firstError}</li>` : '';
+  }).filter(Boolean).join('') : '';
   const rows = detail.map((x) => `
     <tr><td>${TOPICS[x.q.topic]} ${'★'.repeat(x.q.diff)}</td>
     <td>${x.ok ? '✔' : x.answered ? '✘' : '⊘'}</td>
-    <td>${x.yourAns}</td>
+    <td>${escH(x.yourAns)}</td>
     <td>${x.q.type === 'fill' ? x.q.ans[0] : x.q.ans.map((a) => `(${a + 1})`).join('')}</td>
     <td class="${x.ms > x.target ? 'badc' : ''}">${fmtSec(x.ms)}/${fmtSec(x.target)}</td></tr>`).join('');
   app().innerHTML = `
-    <h1>模擬結果 — ${reason}</h1>
+    <h1>模擬結果 — ${mock.reason}</h1>
+    ${mock.partial ? '<div class="card warn">中途結束：只結算你作答過的題，不列入模擬成績走勢（每題紀錄與筆跡照樣保存）。</div>' : ''}
     <div class="card">
-      <p class="big">答對 <b>${okN} / ${paper.length}</b>（${(acc * 100).toFixed(0)}%）→ 體感 <b class="accent">${gradeOf(acc)}</b></p>
+      <p class="big">答對 <b>${okN} / ${paper.length}</b>（${(acc * 100).toFixed(0)}%）${mock.partial ? '' : `→ 體感 <b class="accent">${gradeOf(acc)}</b>`}</p>
+      ${cheers ? `<div class="praise"><b>先說做得好的：</b><ul>${cheers}</ul></div>` : ''}
       <ul>
         <li>「該跳沒跳」（答錯且耗時超過上限 1.5 倍）：<b class="${overStuck.length ? 'badc' : 'okc'}">${overStuck.length} 題</b>${overStuck.length ? ' ← 這是你寫不完的直接原因' : ' ✅'}</li>
         <li>「對但太慢」：<b class="${slowOk.length ? 'warnc' : 'okc'}">${slowOk.length} 題</b>${slowOk.length ? ' ← 已加入錯題本重練速度' : ''}</li>
         <li>剩餘未用時間：${unused > 0 ? fmtClock(unused) : '0（時間用罄）'}</li>
       </ul>
+      ${aiNotes ? `<div class="sol"><b>🤖 AI 抓到的出錯點：</b><ul>${aiNotes}</ul></div>` : ''}
       <table class="tbl"><tr><th>題目</th><th>結果</th><th>你的答案</th><th>正解</th><th>耗時/建議</th></tr>${rows}</table>
       <p class="dim">錯題與超時題已自動加入錯題本，明天到期重測。詳解請到錯題本逐題看。</p>
       <button class="btn primary" onclick="nav('wrong')">去看錯題詳解</button>
@@ -1305,7 +1707,7 @@ function renderWrong() {
       <td>${TOPICS[q.topic]} ${'★'.repeat(q.diff)}</td>
       <td>${w.err || '—'}</td><td>錯 ${w.fails} 次</td>
       <td>${isDue ? '<b class="warnc">今天到期</b>' : w.due}</td>
-      <td><button class="btn sm" onclick="reviewOne('${id}')">重測</button></td></tr>`;
+      <td><button class="btn sm" onclick="reviewOne('${jsA(id)}')">重測</button></td></tr>`;
   }).join('');
   app().innerHTML = `
     <h1>📓 錯題本 <span class="dim">（間隔重測 1→3→7→14 天，連過四關畢業）</span></h1>
@@ -1319,25 +1721,37 @@ let review = null;
 function reviewDue() { if (!syncGate()) return; startReview(dueWrong()); }
 function reviewOne(id) { if (!syncGate()) return; startReview([id]); }
 function startReview(ids) {
-  review = { ids: shuffle(ids), i: 0, okN: 0 };
+  ids = ids.filter((id) => bankById(id)); // 題庫載不到的失效 id（如雲端題包未載入）直接略過，避免炸畫面
+  if (!ids.length) { alert('這些錯題對應的題目不在目前的題庫裡（可能來自尚未載入的雲端題包），暫時無法重測。'); return; }
+  review = { ids: shuffle(ids), i: 0, okN: 0, excl: 0 };
   sessionActive = true;
+  sessionMode = 'review';
+  snapSession();
   reviewNext();
 }
 function reviewNext() {
   if (review.i >= review.ids.length) {
     sessionActive = false;
+    sessionMode = null;
+    sessionChrome(false);
+    const denom = review.ids.length - (review.excl || 0);
+    const allPass = denom > 0 && review.okN === denom;
     app().innerHTML = `<h1>重測完成</h1><div class="card good">
-      <p class="big">過關 ${review.okN} / ${review.ids.length}</p>
+      <p class="big">過關 ${review.okN} / ${denom}</p>
+      ${review.excl ? `<p class="dim">（另有 ${review.excl} 題因中途離開未列入）</p>` : ''}
+      ${allPass ? '<p class="praise">🎉 到期錯題全數過關——之前跌倒的地方都站起來了，這是最扎實的一種進步！</p>' : ''}
       <p>答對的題進入下一個間隔；答錯的明天再來。</p>
       <button class="btn primary" onclick="nav('wrong')">回錯題本</button></div>`;
     return;
   }
   const q = bankById(review.ids[review.i]);
+  if (!q) { review.i++; return reviewNext(); }
   renderQuestion(q, {
     head: `錯題重測 ${review.i + 1} / ${review.ids.length}`,
     review: true,
     onDone(res) {
-      if (res.ok) review.okN++;
+      if (res.excluded) review.excl = (review.excl || 0) + 1;
+      else if (res.ok) review.okN++;
       review.i++;
       reviewNext();
     },
@@ -1348,7 +1762,7 @@ function reviewNext() {
 function renderStats() {
   if (!S.attempts.length) {
     app().innerHTML = `<h1>📊 數據</h1><div class="card"><p>還沒有數據。先去做一次「模擬實戰」摸底，或刷一輪主題題。</p>
-      <button class="btn primary" onclick="nav('mock')">去摸底</button></div>${syncCard()}${backupCard()}`;
+      <button class="btn primary" onclick="nav('mock')">去摸底</button></div>${aiCard()}${syncCard()}${backupCard()}`;
     return;
   }
   // 單元統計
@@ -1422,6 +1836,7 @@ function renderStats() {
     ${procCard}
     ${drillRows ? `<div class="card"><h2>速度特訓進度</h2><table class="tbl"><tr><th>項目</th><th>輪數</th><th>中位數變化</th><th>狀態</th></tr>${drillRows}</table></div>` : ''}
     ${mockRows ? `<div class="card"><h2>模擬成績走勢</h2><table class="tbl"><tr><th>日期</th><th>答對</th><th>答對率</th><th>體感級分</th></tr>${mockRows}</table></div>` : ''}
+    ${aiCard()}
     ${syncCard()}
     ${backupCard()}`;
 }
@@ -1503,7 +1918,7 @@ function supaInit() {
     if (syncState.user && syncState.user.id !== was) syncPull();
     syncPill();
   });
-  window.addEventListener('online', () => { if (syncState.user) syncPush(); });
+  window.addEventListener('online', () => { if (syncState.user) { syncPush(); flushInkQueue(); } });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && syncState.user) { clearTimeout(syncTimer); syncPush(); }
   });
@@ -1544,6 +1959,7 @@ async function syncPush() {
       .upsert({ user_id: syncState.user.id, data: S, updated_at: new Date().toISOString() });
     syncState.pushErr = !!error;
     syncState.msg = error ? '上傳失敗：' + error.message : '已同步 ' + new Date().toTimeString().slice(0, 5);
+    if (!error) flushInkQueue();
   } catch (e) { syncState.pushErr = true; syncState.msg = '離線（資料在本機，連上後自動補傳）'; }
   syncPill();
 }
@@ -1590,15 +2006,31 @@ function mergeState(a, b) {
   for (const d of Object.keys(a.daily || {})) daily[d] = { ...(daily[d] || {}), ...a.daily[d] };
   return { ...b, ...a, attempts, wrong, drills, mocks, daily, extbank };
 }
+let inkQueue = []; // 上傳失敗的筆跡列，連上網或下次同步時補傳（上限 200 筆防爆記憶體）
+function supaInkInsert(row) {
+  supa.from('ink_sessions').insert(row).then(({ error }) => {
+    if (error) {
+      if (inkQueue.length < 200) inkQueue.push(row);
+      syncState.msg = '筆跡上傳失敗（已排隊，連線後補傳）';
+      syncPill();
+    }
+  });
+}
+function flushInkQueue() {
+  if (!supa || !syncState.user || !inkQueue.length) return;
+  const q = inkQueue; inkQueue = [];
+  for (const row of q) supaInkInsert(row);
+}
 function syncInk(qid, t0, proc) {
   if (!supa || !syncState.user) return;
   const st = sessionInk[qid]; if (!st) return;
+  // 完整書寫錄影進雲端：計算區(s)＋題目畫記(q)＋答案區(a)＋塗改事件(e)，供後續 AI 統整分析
   const strokes = st.s.filter((s) => s.t0 >= t0);
+  const qmarks = (st.q || []).filter((s) => s.t0 >= t0);
+  const answers = (st.a || []).filter((s) => s.t0 >= t0);
   const eras = st.e.filter((t) => t >= t0);
-  if (!strokes.length && !eras.length) return;
-  supa.from('ink_sessions')
-    .insert({ user_id: syncState.user.id, qid, t0, proc: proc || null, strokes: { s: strokes, e: eras } })
-    .then(({ error }) => { if (error) syncState.msg = '筆跡上傳失敗：' + error.message; });
+  if (!strokes.length && !qmarks.length && !answers.length && !eras.length) return;
+  supaInkInsert({ user_id: syncState.user.id, qid, t0, proc: proc || null, strokes: { s: strokes, e: eras, q: qmarks, a: answers } });
 }
 async function syncLogin(isSignup) {
   const email = $('#sy-email').value.trim();
