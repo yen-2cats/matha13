@@ -311,6 +311,9 @@ sup .vfrac { font-size: 1em; margin: 0 0.05em; }
 .rejudge a { color: var(--accent); cursor: pointer; text-decoration: underline; margin-left: 4px; }
 /* 中段唯一那塊（答錯的最簡算法 / 超時的更快做法） */
 .one-method { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; margin: 8px 0; line-height: 1.7; }
+/* 🎯 下次這樣做：可記住的關鍵路徑，做成醒目主角框 */
+.next-step { background: rgba(15, 118, 110, 0.09); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 10px 13px; margin: 9px 0; line-height: 1.65; color: var(--accent); }
+.next-step b { color: var(--accent); }
 /* AI 像老師一樣把紅圈畫在你的手寫圖上 */
 .ai-marked { margin: 8px 0; }
 .am-wrap { position: relative; display: inline-block; max-width: 100%; width: 480px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #fff; }
