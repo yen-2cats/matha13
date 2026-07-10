@@ -966,6 +966,120 @@ function dueWrong() {
   return Object.keys(S.wrong).filter((id) => S.wrong[id].due <= t);
 }
 
+/* ═══════════ 🍅 番茄鐘（25 分鐘自動配餐） ═══════════
+   當下該練的，一顆番茄裝滿：到期錯題 → 速訓一輪（挑最該練的）→ 弱單元刷題；
+   每做完一題自動補下一題，直到 25 分鐘滿（提早做完＝自動加菜，不會沒事做）。 */
+let pomo = null;
+const POMO_MIN = 25;
+function startPomo() {
+  if (!syncGate()) return;
+  pomo = { tEnd: Date.now() + POMO_MIN * 60e3, expired: false, seen: new Set(),
+           wrongIds: shuffle(dueWrong().filter((id) => bankById(id))), n: 0, pq: null, iv: null,
+           stats: { wrong: 0, wrongOk: 0, drillRounds: 0, prac: 0, pracOk: 0 } };
+  sessionActive = true;
+  sessionMode = 'prac';
+  snapSession();
+  pomoPill();
+  pomoServe();
+}
+function pomoPill() {
+  let el = $('#pomopill');
+  if (!el) { el = document.createElement('div'); el.id = 'pomopill'; el.className = 'pomo-pill'; document.body.appendChild(el); }
+  const tick = () => {
+    if (!pomo) return;
+    const left = pomo.tEnd - Date.now();
+    if (left <= 0 && !pomo.expired) {
+      pomo.expired = true;
+      el.classList.add('done');
+      flashOnce('🍅 25 分鐘到——做完手上這題就收工');
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    }
+    el.textContent = left > 0 ? `🍅 ${fmtClock(left)}` : '🍅 收尾中';
+    if (left <= 180000 && left > 0) el.classList.add('warn');
+  };
+  tick();
+  pomo.iv = setInterval(tick, 1000);
+}
+function pomoCancel() {
+  if (!pomo) return;
+  clearInterval(pomo.iv);
+  const el = $('#pomopill'); if (el) el.remove();
+  pomo = null;
+}
+function pomoServe() {
+  if (!pomo) return;
+  if (pomo.expired) return pomoDone();
+  // ① 到期錯題（投報率最高，先清）
+  const wid = pomo.wrongIds.shift();
+  if (wid) {
+    const q = bankById(wid);
+    if (!q) return pomoServe();
+    pomo.n++;
+    renderQuestion(q, {
+      head: `🍅 第 ${pomo.n} 題｜錯題重測`,
+      review: true,
+      onDone(res) {
+        if (pomo && !res.excluded) { pomo.stats.wrong++; if (res.ok) pomo.stats.wrongOk++; }
+        if (pomo && !pomo.wrongIds.length) pomoMarkDaily('wrongq');
+        pomoServe();
+      },
+    });
+    return;
+  }
+  // ② 速訓一輪（挑最該練的；drillDone 裡的掛鉤會接回來）
+  if (!pomo.stats.drillRounds) { startDrill(dailyPick()); return; }
+  // ③ 弱單元刷題：4 題一批、做完自動補下一批
+  if (!pomo.pq || !pomo.pq.length) pomo.pq = pomoRefill();
+  const q = pomo.pq.shift();
+  if (!q) return pomoDone(); // 可用題真的被掃光
+  pomo.seen.add(q.id);
+  pomo.n++;
+  renderQuestion(q, {
+    head: `🍅 第 ${pomo.n} 題｜${TOPICS[q.topic]}`,
+    onDone(res) {
+      if (pomo && !res.excluded) { pomo.stats.prac++; if (res.ok) pomo.stats.pracOk++; }
+      if (pomo && pomo.stats.prac >= 8) pomoMarkDaily('prac');
+      pomoServe();
+    },
+  });
+}
+function pomoRefill() {
+  const byTopic = {};
+  for (const a of S.attempts) {
+    const q = bankById(a.qid); if (!q) continue;
+    const t = (byTopic[q.topic] = byTopic[q.topic] || { n: 0, ok: 0 });
+    t.n++; t.ok += a.ok ? 1 : 0;
+  }
+  const worst = Object.keys(byTopic)
+    .map((k) => ({ k, acc: byTopic[k].ok / byTopic[k].n }))
+    .sort((a, b) => a.acc - b.acc).slice(0, 3).map((t) => t.k);
+  let pool = worst.length ? BANK.filter((q) => worst.includes(q.topic)) : BANK.slice();
+  pool = pool.filter((q) => !pomo.seen.has(q.id));
+  if (pool.length < 4) pool = BANK.filter((q) => !pomo.seen.has(q.id));
+  pool = shuffle(pool).sort((a, b) => attemptsOf(a.id).length - attemptsOf(b.id).length);
+  return dedupeStems(pool, 4);
+}
+function pomoMarkDaily(k) {
+  const t = today();
+  S.daily[t] = S.daily[t] || {};
+  if (!S.daily[t][k]) { S.daily[t][k] = true; save(); }
+}
+function pomoDone() {
+  if (!pomo) return;
+  const st = pomo.stats;
+  clearInterval(pomo.iv);
+  const el = $('#pomopill'); if (el) el.remove();
+  pomo = null;
+  sessionActive = false; sessionMode = null; sessionChrome(false);
+  app().innerHTML = `<h1>🍅 番茄鐘完成</h1>
+    <div class="card good">
+      <p class="big">錯題重測 <b>${st.wrongOk}/${st.wrong}</b>｜速訓 <b>${st.drillRounds}</b> 輪｜刷題 <b>${st.pracOk}/${st.prac}</b></p>
+      <p class="praise">🎉 25 分鐘全力輸出——休息 5 分鐘再回來。</p>
+      <div class="actr"><button class="btn" onclick="nav('home')">回首頁</button>
+      <button class="btn primary" onclick="startPomo()">🍅 再來一顆</button></div>
+    </div>`;
+}
+
 /* ═══════════ ▶ 今日菜單一鍵啟動 ═══════════
    自動排程：速度特訓（挑最該練的）→ 清到期錯題 → 主題刷題 8 題（挑最弱單元），
    每段完成自動打勾，不用自己對照清單、選單元、回頭打勾。 */
@@ -1138,8 +1252,9 @@ function todayCard() {
   const streak = streakOf(days);
   return `<div class="card"><div class="today-row">
       <span>🔥 連續 <b>${streak}</b> 天｜今日 <b>${tn}</b> / ${DAY_GOAL} 題</span>
-      <span class="shr"><button class="btn" onclick="nav('phone')">📱 手機專區</button>
-      <button class="btn primary" onclick="startDaily()">▶ 一鍵開始今日菜單</button></span>
+      <span class="shr"><button class="btn" onclick="nav('phone')">📱</button>
+      <button class="btn" onclick="startDaily()">▶ 今日菜單</button>
+      <button class="btn primary" onclick="startPomo()">🍅 25 分鐘</button></span>
     </div>
     <div class="goalbar"><div style="width:${Math.min(100, Math.round(100 * tn / DAY_GOAL))}%"></div></div></div>`;
 }
@@ -1169,6 +1284,7 @@ function endSession() {
   sessionActive = false;
   sessionMode = null;
   dailyFlow = null; // 中途離開＝取消今日菜單接力
+  pomoCancel();     // 中途離開＝番茄鐘作廢
   stopTicker();
   if (ink) inkStop();
   if (drill && drill.nextTimer) { clearTimeout(drill.nextTimer); drill.nextTimer = null; }
@@ -1947,6 +2063,14 @@ function drillDone() {
   const acc = Math.round(100 * drill.results.filter((r) => r.ok).length / drill.results.length);
   (S.drills[drill.key] = S.drills[drill.key] || []).push({ d: today(), med, acc });
   save();
+  if (pomo) { // 番茄鐘裡的速訓：記一輪、標今日、直接接下一項（不看結算畫面）
+    pomo.stats.drillRounds++;
+    pomoMarkDaily('drill');
+    sessionActive = true;
+    sessionMode = 'prac';
+    pomoServe();
+    return;
+  }
   const hist = S.drills[drill.key];
   const prev = hist.length > 1 ? hist[hist.length - 2] : null;
   const speedOK = med / 1000 <= d.target;
