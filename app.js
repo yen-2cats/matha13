@@ -794,11 +794,12 @@ function mlibCard() {
       <div class="chips r">${Object.keys(TOPICS).map((k) => `<button class="btn sm" onclick="showMethods('${k}')">${TOPICS[k]}</button>`).join('')}</div>
       <div id="mlib-box"></div></div>`;
 }
-/* 根號加上蓋線：√48、√(x²+y²) → 被開方數上方畫線（顯示用） */
+/* 根號顯示：用乾淨的 √ 緊貼被開方數（單一根式課本就這樣印，不加浮空蓋線）。
+   只確保 √ 與後面的數/式不被斷行拆開；分組用括號 √(...) 本身已清楚。 */
 function rtTxt(s) {
   return String(s)
-    .replace(/√\(([^()<>]+)\)/g, '<span class="rt">√<span class="rtv">$1</span></span>')
-    .replace(/√(\d+(?:\.\d+)?)/g, '<span class="rt">√<span class="rtv">$1</span></span>');
+    .replace(/√\(([^()<>]+)\)/g, '<span class="rt">√($1)</span>')
+    .replace(/√(\d+(?:\.\d+)?)/g, '<span class="rt">√$1</span>');
 }
 /* 方法庫等純文字內的分數轉直式＋根號蓋線（保守：只轉 a/b、√a/b 形式） */
 function mathTxt(s) {

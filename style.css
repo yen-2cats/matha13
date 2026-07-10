@@ -251,9 +251,8 @@ label.opt.block input { margin-right: 8px; accent-color: var(--accent); }
 /* 補習班模考登錄表單 */
 .chip.col { flex-direction: column; align-items: flex-start; gap: 3px; }
 .ans-input.sm { width: 6em; padding: 6px 8px; margin: 0; }
-/* 根號蓋線 */
-.rt { white-space: nowrap; }
-.rt .rtv { border-top: 1.6px solid currentColor; padding: 0 0.1em; }
+/* 根號：用拉丁數學字型的比例寬度 √（明體的 √ 是全形、右邊會留一大塊空白），緊貼被開方數、不斷行 */
+.rt { white-space: nowrap; font-family: "Cambria Math", "Times New Roman", "STIX Two Math", "Noto Serif", Georgia, serif; }
 /* 直式數學：分數與 C/P 上下標 */
 .vfrac { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; line-height: 1.15; margin: 0 0.15em; font-size: 0.9em; font-variant-numeric: tabular-nums; }
 .vfrac > .vn { padding: 0 0.3em 0.06em; border-bottom: 1.6px solid currentColor; }
