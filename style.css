@@ -285,13 +285,6 @@ label.opt.block input { margin-right: 8px; accent-color: var(--accent); }
 .bar .t80 { left: 80%; }
 .bar-val { flex: 0 0 150px; text-align: right; font-variant-numeric: tabular-nums; }
 
-.task {
-  display: block; padding: 9px 12px; margin: 5px 0;
-  background: var(--panel2); border-radius: var(--r-s); cursor: pointer;
-}
-.task input { accent-color: var(--accent); margin-right: 8px; }
-.task.done { opacity: 0.55; text-decoration: line-through; }
-
 @media (max-width: 600px) {
   /* 橫條改兩行：標題+數值一行、整寬橫條第二行——條長對比恢復全幅 */
   .bar-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin: 9px 0; }

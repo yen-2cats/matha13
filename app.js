@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0712b'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0712c'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -161,21 +161,21 @@ function backupCard() {
 }
 
 /* ═══════════ ✍️ 手寫過程紀錄（平板＋觸控筆） ═══════════
-   三個書寫面：題目畫記(q)、計算區(s)、答案區(a)。每一筆帶時間戳與顏色。
+   單一書寫面：整卡計算紙（#ink-cv 蓋滿題卡，題目印在底下處處可寫）。每一筆帶時間戳與顏色。
    只認觸控筆與滑鼠——手掌/手指不會畫線、也不會誤觸捲動（兩指手勢才捲動）。
-   自動偵測：起筆猶豫、題中停頓（≥15s）、塗改（復原）、尾段放棄（最後一筆到送出）。 */
+   自動偵測：起筆猶豫、題中停頓（≥15s）、塗改（復原）、尾段放棄（最後一筆到送出）。
+   （2026-07-12 清理：早期「題目畫記(q)/答案區(a)」雙畫布已死多時——#qink-cv/#ans-cv 從不渲染、
+   st.q/st.a 恆空，所有三面分支一併移除；雲端 strokes 欄位仍相容舊格式讀取。） */
 const HES_GAP = 15000;
 const INK_W = 1.35; // 筆跡粗細（原本 2 的 2/3）
 const INK_COLORS = { k: '#1f2937', r: '#dc2626', g: '#15803d' };
 let inkColor = 'k';
 let ink = null;
 let replaying = false;
-const sessionInk = {}; // qid → { s:計算筆畫, e:塗改時間, q:題目畫記, a:答案區筆畫 }
+const sessionInk = {}; // qid → { s:筆畫, e:塗改時間, m:批改標記 }
 
 function inkStore(qid) {
-  const st = (sessionInk[qid] = sessionInk[qid] || { s: [], e: [] });
-  st.q = st.q || []; st.a = st.a || [];
-  return st;
+  return (sessionInk[qid] = sessionInk[qid] || { s: [], e: [] });
 }
 function inkToolsHTML() {
   return `<span class="ink-tools">
@@ -207,17 +207,14 @@ function inkSurface(key, cv, h) {
   cv.oncontextmenu = (e) => e.preventDefault();
   return sur;
 }
-function inkArr(sur) {
-  const st = inkStore(ink.qid);
-  return sur.key === 'calc' ? st.s : sur.key === 'q' ? st.q : st.a;
-}
+function inkArr() { return inkStore(ink.qid).s; }
 function inkStart(qid, t0, since) {
   const cv = $('#ink-cv'); if (!cv) return;
   replaying = false; // 換題即解除回放鎖，避免上一題的回放把新題的筆鎖死
   const st = inkStore(qid);
   // 歸檔舊筆跡：同一題再次作答時不重現上次內容（模擬第二輪傳 sessT0 保留第一輪）
   const cut = since != null ? since : t0;
-  for (const arr of [st.s, st.q, st.a]) for (const s of arr) if (!s.dead && !s.arch && s.t0 < cut) s.arch = 1;
+  for (const s of st.s) if (!s.dead && !s.arch && s.t0 < cut) s.arch = 1;
   if (st.m) for (const m of st.m) if (!m.arch && m.t < cut) m.arch = 1; // 舊批改標記一起歸檔
   let maxY = 0;
   for (const s of st.s) if (!s.dead && !s.arch) for (const p of s.pts) if (p[1] > maxY) maxY = p[1];
@@ -231,28 +228,18 @@ function inkStart(qid, t0, since) {
     ink.ro = new ResizeObserver(() => { if (ink && ink.sur.calc) inkSizeSur(ink.sur.calc); });
     ink.ro.observe(cv.parentElement);
   }
-  const qcv = $('#qink-cv');
-  if (qcv) {
-    ink.sur.q = inkSurface('q', qcv, 0);
-    if (window.ResizeObserver && !ink.ro) {
-      ink.ro = new ResizeObserver(() => { if (ink && ink.sur.q) inkSizeSur(ink.sur.q); });
-      ink.ro.observe(qcv.parentElement);
-    }
-  }
-  const acv = $('#ans-cv');
-  if (acv) ink.sur.ans = inkSurface('ans', acv, 150);
-  for (const k of Object.keys(ink.sur)) inkSizeSur(ink.sur[k]);
+  inkSizeSur(ink.sur.calc);
   inkColorSet(inkColor);
 }
 function inkSizeSur(sur) {
   const dpr = window.devicePixelRatio || 1;
   let w, h;
   const wrap = sur.cv.parentElement;
-  if (sur.key === 'q' || sur.cv.classList.contains('qink')) {
+  if (sur.cv.classList.contains('qink')) {
     // 整卡書寫層：畫布蓋滿整張卡（題目也能寫），尺寸跟著卡片走
     w = wrap.clientWidth; h = wrap.clientHeight;
   } else {
-    w = wrap.clientWidth; h = sur.h;
+    w = wrap.clientWidth; h = sur.h; // 手機專區的獨立筆記卡
   }
   sur.cv.width = Math.max(1, Math.round(w * dpr));
   sur.cv.height = Math.max(1, Math.round(h * dpr));
@@ -335,36 +322,18 @@ function inkMove(e, sur) {
 function inkUp(e, sur) {
   if (!ink) return;
   if (e.pointerType === 'touch') {
-    const tp = sur.touches.get(e.pointerId);
     sur.touches.delete(e.pointerId);
-    // 單指快速輕點＝要按畫布底下的按鈕（整卡書寫層需要點擊穿透）
-    if (tp && sur.key === 'q' && sur.touches.size === 0 && Date.now() - tp.t < 400
-        && Math.abs(e.clientX - tp.x0) < 8 && Math.abs(e.clientY - tp.y0) < 8) inkClickThru(e, sur);
-    return;
+    return; // 按鈕/選項都以 z-index 浮在畫布上層，觸點會直接落在它們身上，不需要穿透
   }
   if (!sur.cur) return;
   const cur = sur.cur; sur.cur = null;
-  if (cur.pts.length > 1) { cur.t1 = Date.now(); inkArr(sur).push(cur); }
-  else if (sur.key === 'q') inkClickThru(e, sur); // 筆尖/滑鼠輕點＝按按鈕，不是畫點
-}
-/* 點擊穿透：畫布蓋整張題卡後，輕點選項/按鈕/輸入欄要照常作用 */
-function inkClickThru(e, sur) {
-  const cv = sur.cv;
-  cv.style.pointerEvents = 'none';
-  const el = document.elementFromPoint(e.clientX, e.clientY);
-  cv.style.pointerEvents = '';
-  const hit = el && el.closest && el.closest('button, a, input, select, textarea, label, summary, [onclick]');
-  if (!hit) return;
-  hit.click();
-  if (hit.matches && hit.matches('input:not([type=checkbox]):not([type=radio]), textarea')) hit.focus();
+  if (cur.pts.length > 1) { cur.t1 = Date.now(); inkArr(sur).push(cur); } // 單點＝誤觸，不留筆畫
 }
 function inkUndo() {
   if (!ink) return;
   const st = inkStore(ink.qid);
   let best = null;
-  for (const arr of [st.s, st.q, st.a]) {
-    for (const s of arr) if (!s.dead && !s.arch && (!best || s.t0 > best.t0)) best = s;
-  }
+  for (const s of st.s) if (!s.dead && !s.arch && (!best || s.t0 > best.t0)) best = s;
   if (!best) return;
   best.dead = Date.now();
   st.e.push(Date.now());
@@ -389,12 +358,12 @@ function inkRedraw(sur) {
   // 進行中的筆畫也要補畫（自動加長重設 canvas 會清空 bitmap）
   if (sur.cur && sur.cur.pts && sur.cur.pts.length > 1) inkDrawStroke(sur.ctx, sur.cur);
   const st = sessionInk[ink.qid];
-  if (st && st.m) for (const m of st.m) if (!m.arch && m.sur === sur.key) inkDrawMark(sur.ctx, m, sur.cv.clientWidth, sur.cv.clientHeight);
+  if (st && st.m) for (const m of st.m) if (!m.arch) inkDrawMark(sur.ctx, m, sur.cv.clientWidth, sur.cv.clientHeight);
 }
-/* ═══ 批改標記：對→紅勾畫在答案旁、錯→紅叉＋正解寫在下面（像老師改考卷） ═══ */
-function inkMark(qid, surKey, ok, ansText) {
+/* ═══ 批改標記：對→紅勾畫在答案旁（最後一筆處）、錯→紅叉＋正解寫在下面（像老師改考卷） ═══ */
+function inkMark(qid, ok, ansText) {
   const st = sessionInk[qid]; if (!st) return;
-  const arr = ((surKey === 'q' ? st.q : st.s) || []).filter((s) => !s.dead && !s.arch);
+  const arr = st.s.filter((s) => !s.dead && !s.arch);
   if (!arr.length) return;
   const last = arr.reduce((a, b) => ((b.t1 || b.t0) > (a.t1 || a.t0) ? b : a));
   let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
@@ -402,9 +371,9 @@ function inkMark(qid, surKey, ok, ansText) {
     if (p[0] < x0) x0 = p[0]; if (p[1] < y0) y0 = p[1];
     if (p[0] > x1) x1 = p[0]; if (p[1] > y1) y1 = p[1];
   }
-  const cv = surKey === 'q' ? $('#qink-cv') : $('#ink-cv');
+  const cv = $('#ink-cv');
   if (!cv) return;
-  const m = { t: Date.now(), sur: surKey, ok: !!ok, txt: ok ? null : `正解：${ansText}`, x0, y0, x1, y1 };
+  const m = { t: Date.now(), ok: !!ok, txt: ok ? null : `正解：${ansText}`, x0, y0, x1, y1 };
   (st.m = st.m || []).push(m);
   inkDrawMark(cv.getContext('2d'), m, cv.clientWidth, cv.clientHeight);
 }
@@ -465,30 +434,28 @@ function inkStop() {
   ink = null;
   const st = inkStore(qid);
   const now = Date.now();
-  // 時間軸指標用三面（計算/題卡畫記/答案）合併算：先在題目上圈關鍵字不再被記成假猶豫
-  const tl = [...st.s, ...(st.q || []), ...(st.a || [])].filter((s) => s.t0 >= t0 && !s.sub).sort((a, b) => a.t0 - b.t0);
-  const ss = st.s.filter((s) => s.t0 >= t0 && !s.sub);
+  const ss = st.s.filter((s) => s.t0 >= t0 && !s.sub).sort((a, b) => a.t0 - b.t0);
   const era = st.e.filter((t) => t >= t0).length;
-  if (!tl.length && !era) return null;
+  if (!ss.length && !era) return null;
   const sec = (x) => Math.round(x / 1000);
   const hes = [];
-  for (let i = 1; i < tl.length; i++) {
-    const gap = tl[i].t0 - tl[i - 1].t1;
-    if (gap >= HES_GAP) hes.push([sec(tl[i - 1].t1 - t0), sec(gap)]);
+  for (let i = 1; i < ss.length; i++) {
+    const gap = ss[i].t0 - ss[i - 1].t1;
+    if (gap >= HES_GAP) hes.push([sec(ss[i - 1].t1 - t0), sec(gap)]);
   }
   return {
-    fi: tl.length ? sec(tl[0].t0 - t0) : null,
+    fi: ss.length ? sec(ss[0].t0 - t0) : null,
     hes: hes.slice(0, 12),
     era,
-    tail: tl.length ? sec(now - tl[tl.length - 1].t1) : null,
+    tail: ss.length ? sec(now - ss[ss.length - 1].t1) : null,
     n: ss.length,
   };
 }
-/* 把某書寫面（'s'=計算區 / 'a'=答案區）輸出成裁切過的 PNG base64（給 AI 批改或縮圖） */
-function inkCapture(qid, key, asDataURL) {
+/* 整卡手寫輸出成裁切白底 PNG base64（AI 批改與批改面板縮圖用） */
+function inkCaptureFull(qid, asDataURL) {
   const st = sessionInk[qid];
   if (!st) return null;
-  const arr = ((key === 'a' ? st.a : key === 'q' ? st.q : st.s) || []).filter((s) => !s.dead && !s.arch);
+  const arr = st.s.filter((s) => !s.dead && !s.arch);
   if (!arr.length) return null;
   let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
   for (const s of arr) for (const p of s.pts) {
@@ -505,44 +472,6 @@ function inkCapture(qid, key, asDataURL) {
   ctx.setTransform(scale, 0, 0, scale, (pad - x0) * scale, (pad - y0) * scale);
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   for (const s of arr) inkDrawStroke(ctx, s, 2.2);
-  const url = cv.toDataURL('image/png');
-  return asDataURL ? url : url.split(',')[1];
-}
-/* 整卷截圖：題卡（題目上/周圍）筆跡在上、計算區在下，拼成一張給 AI——跟版面順序一致 */
-function inkCaptureFull(qid, asDataURL) {
-  const qUrl = inkCapture(qid, 'q', true), sUrl = inkCapture(qid, 's', true);
-  if (!qUrl && !sUrl) return null;
-  if (!qUrl || !sUrl) {
-    const one = qUrl || sUrl;
-    return asDataURL ? one : one.split(',')[1];
-  }
-  // 兩面都有：同步重畫兩面到一張畫布（不能用 <img> 非同步載入）
-  const draw = (key) => {
-    const st = sessionInk[qid];
-    const arr = ((key === 'q' ? st.q : st.s) || []).filter((s) => !s.dead && !s.arch);
-    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-    for (const s of arr) for (const p of s.pts) {
-      if (p[0] < x0) x0 = p[0]; if (p[1] < y0) y0 = p[1];
-      if (p[0] > x1) x1 = p[0]; if (p[1] > y1) y1 = p[1];
-    }
-    return { arr, x0, y0, w: x1 - x0 + 28, h: y1 - y0 + 28 };
-  };
-  const qd = draw('q'), sd = draw('s');
-  const w = Math.max(qd.w, sd.w), gap = 26;
-  const scale = Math.min(2, Math.max(0.4, 1100 / w));
-  const cv = document.createElement('canvas');
-  cv.width = Math.max(1, Math.round(w * scale));
-  cv.height = Math.max(1, Math.round((qd.h + gap + sd.h) * scale));
-  const ctx = cv.getContext('2d');
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  ctx.setTransform(scale, 0, 0, scale, (14 - qd.x0) * scale, (14 - qd.y0) * scale);
-  for (const s of qd.arr) inkDrawStroke(ctx, s, 2.2);
-  ctx.setTransform(scale, 0, 0, scale, (14 - sd.x0) * scale, (qd.h + gap + 14 - sd.y0) * scale);
-  for (const s of sd.arr) inkDrawStroke(ctx, s, 2.2);
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  ctx.strokeStyle = '#9ca3af'; ctx.lineWidth = 1; ctx.setLineDash([7, 7]);
-  ctx.beginPath(); ctx.moveTo(0, qd.h + gap / 2); ctx.lineTo(w, qd.h + gap / 2); ctx.stroke();
   const url = cv.toDataURL('image/png');
   return asDataURL ? url : url.split(',')[1];
 }
@@ -624,19 +553,6 @@ function stuckHTML(stuck) {
       <span class="stuck-at">第 ${s.at != null ? s.at : '?'} 秒<br>停 ${s.dur != null ? s.dur : '?'} 秒</span>
       <div class="stuck-body">${s.ph ? `<span class="stuck-ph">${escH(s.ph)}</span>` : ''}<p>${escH(s.what)}</p>
       ${s.fix ? `<p class="stuck-fix">💡 ${escH(s.fix)}</p>` : ''}</div></div>`).join('')}</div>`;
-}
-/* 批改標記畫在「最後一筆」所在的那一面（答案通常寫在最後） */
-function inkMarkAuto(qid, ok, ansText) {
-  const st = sessionInk[qid]; if (!st) return;
-  const lastOf = (arr) => (arr || []).filter((s) => !s.dead && !s.arch).reduce((a, b) => (!a || (b.t1 || b.t0) > (a.t1 || a.t0) ? b : a), null);
-  const lq = lastOf(st.q), ls = lastOf(st.s);
-  const sur = ls && (!lq || (ls.t1 || ls.t0) >= (lq.t1 || lq.t0)) ? 's' : lq ? 'q' : null;
-  if (sur) inkMark(qid, sur, ok, ansText);
-}
-function inkSummary(p) {
-  if (!p) return '';
-  const longest = p.hes.length ? Math.max(...p.hes.map((h) => h[1])) : 0;
-  return `<p class="dim">✍️ 過程：起筆 ${p.fi != null ? p.fi + 's' : '—'}｜題中停頓 ${p.hes.length} 次${longest ? `（最長 ${longest}s）` : ''}｜塗改 ${p.era} 次｜最後一筆到送出 ${p.tail != null ? p.tail + 's' : '—'}</p>`;
 }
 function mergeProc(a, b) {
   if (!a) return b;
@@ -1497,6 +1413,7 @@ function startDaily() {
       <li>🎯 弱項刷題 8 題<span class="dim">（${atk || '全範圍'}）</span></li>
     </ol><p class="dim">每段結束自動接下一段；中途 ✕ 可退出。</p>`, [
     ['開始 →', () => { dailyFlow = { stage: 0 }; dailyNext(); }, 'primary'],
+    ['🍅 只有 25 分鐘？改用番茄鐘（同菜單、時間到收工）', startPomo],
     ['先不要', null],
   ]);
 }
@@ -1680,7 +1597,6 @@ function todayCard() {
   return `<div class="card"><div class="today-row">
       ${streakLine}
       <span class="shr"><button class="btn" onclick="nav('phone')">📱 零碎時間</button>
-      <button class="btn" onclick="startPomo()">🍅 只有 25 分鐘？</button>
       <button class="btn primary" onclick="startDaily()">▶ 今日菜單</button></span>
     </div>
     <div class="goalbar${goalDone ? ' done' : ''}"><div style="width:${Math.min(100, Math.round(100 * tn / DAY_GOAL))}%"></div></div>
@@ -2601,7 +2517,7 @@ function drillJudge(ok) {
 function drillFinish(ok, given, ms, proc) {
   const it = drill.items[drill.i];
   const ansTxt = it.kind === 'num' ? it.ans : it.opts[it.ans];
-  if (it.kind === 'num') inkMark(drill.qid, 's', ok, String(it.ans)); // 自評/打字也照樣畫紅筆
+  if (it.kind === 'num') inkMark(drill.qid, ok, String(it.ans)); // 自評/打字也照樣畫紅筆
   factResult(it.fk, ok); // 必背事實：更新間隔複習排程（非事實題 fk 為空、自動略過）
   drill.results.push({ ok, ms, q: it.q, ans: ansTxt, given });
   syncInk(drill.qid, drill.t0, Object.assign({ mode: 'drill', ok }, proc || {}));
@@ -3023,14 +2939,13 @@ function qGrade(optIdx) {
   qsess.calcImg = calcB64 ? 'data:image/png;base64,' + calcB64 : null; // 存起同一張圖：批改後可在你的筆跡上畫紅圈
   const _st = sessionInk[q.id] || {};
   const _ns = (_st.s || []).filter((s) => !s.dead && !s.arch).length;
-  const _nq = (_st.q || []).filter((s) => !s.dead && !s.arch).length;
-  qsess.diag = `診斷 v${APP_VER}：key=${aiKey() ? '有' : '無'}｜筆跡 計算區${_ns}＋題卡${_nq} 筆｜截圖=${calcB64 ? '成功' : '空'}`;
+  qsess.diag = `診斷 v${APP_VER}：key=${aiKey() ? '有' : '無'}｜筆跡 ${_ns} 筆｜截圖=${calcB64 ? '成功' : '空'}`;
   if (aiKey() && calcB64) {
     $('#qfb').innerHTML = '<p class="dim">🤖 AI 批改中…（認字、對答案、檢查過程哪裡開始錯）</p>';
     const sess = qsess; // 綁定本題：離開或換題後，遲到的回應直接丟棄
     sess.stuckShots = inkStuckShots(q.id, sess.t0); // 停頓證據圖一起送：同一次 API 順帶判讀「當時卡在哪」
     aiGradeCall(q, q.ans.join(' 或 '), calcB64, sess.stuckShots)
-      .then((v) => { if (qsess !== sess) return; qsess.ai = v; qsess.stuck = normStuck(v, sess.stuckShots); const ok = aiCorrect(v); inkMarkAuto(q.id, ok, String(q.ans[0])); qResolve(ok); }) // AI 判定直接生效→解答頁（不再多按一次「改對了」；改判連結留在解答頁）
+      .then((v) => { if (qsess !== sess) return; qsess.ai = v; qsess.stuck = normStuck(v, sess.stuckShots); const ok = aiCorrect(v); inkMark(q.id, ok, String(q.ans[0])); qResolve(ok); }) // AI 判定直接生效→解答頁（不再多按一次「改對了」；改判連結留在解答頁）
       .catch((e) => { if (qsess !== sess) return; qsess.aiErr = (e && e.message) || String(e); qShowJudge(false); });
   } else {
     if (aiKey() && !calcB64) qsess.noInk = true; // 有 key 卻沒有任何筆跡：要明講，不能靜默
@@ -3047,7 +2962,7 @@ function qShowJudge(hasAI) {
       <p class="dim">AI 判得對就繼續；判錯了可以改判。</p>
       <div class="actr"><button class="btn" onclick="qResolve(${!okv})">改判：其實我${okv ? '錯了' : '對了'}</button>
       <button class="btn primary" onclick="qResolve(${okv})">${okv ? '✓ 沒錯，我答對了' : '✗ 對，我答錯了'}——繼續</button></div>`;
-    inkMarkAuto(q.id, okv, String(q.ans[0])); // 像老師改考卷：畫在最後一筆所在的那一面
+    inkMark(q.id, okv, String(q.ans[0])); // 像老師改考卷：紅勾/紅叉畫在最後一筆旁
   } else {
     const noKeyHint = !qsess.aiErr && !aiKey() && supa && syncState.user
       ? '<p class="warnc">⚠ 這台裝置還沒拿到 AI key——如果你已在別台填過，重新整理此頁同步後就會自動批改。</p>' : '';
@@ -3190,7 +3105,6 @@ function qResolve(ok) {
       <summary class="dim">📖 ${ok ? '完整解說' : '其他解法'}（詳解 · 老師方法 · 回放）</summary>
       ${solInFull}${tipInFull}${teachBlock(q.id)}
       <div class="mlib" style="margin-top:6px"><div id="mlib-box"></div></div>
-      ${inkSummary(qsess.proc)}
       ${qsess.proc && qsess.proc.n ? `<div class="actr">${qsess.stuck && qsess.stuck.length && qsess.stuck[0].at != null ? `<button class="btn sm" onclick="inkReplay('${jsA(q.id)}', ${qsess.t0}, ${qsess.t0 + Math.max(0, (qsess.stuck[0].at - 5)) * 1000})">⏸ 從卡點前回放</button>` : ''}<button class="btn sm" onclick="inkReplay('${jsA(q.id)}', ${qsess.t0})">▶ 回放解題過程</button></div>` : ''}
     </details>`;
   fb.innerHTML = `<div class="sol graded">${verdict}${reJudge}${action}${mid}<div id="ai-proc"></div>${full}${qsess.exclude ? '<p class="warnc">（依你的選擇，這筆不列入紀錄）</p>' : ''}</div>`;
@@ -4039,22 +3953,17 @@ function renderPlan() {
   const weeks = Math.floor(days / 7);
   const t = today();
   const done = S.daily[t] || {};
-  const tasks = [
-    ['drill', '⚡ 速度特訓 1~2 輪（10 分）'],
-    ['wrongq', '📓 清空到期錯題（10 分）'],
-    ['prac', '🎯 主題限時 8 題——打「數據」頁的優先單元（35 分）'],
-    ['log', '看一眼 📊 數據，確認明天打哪個單元（2 分）'],
-  ];
-  const checklist = tasks.map(([k, label]) =>
-    `<label class="task ${done[k] ? 'done' : ''}"><input type="checkbox" ${done[k] ? 'checked' : ''} onchange="toggleTask('${k}')"> ${label}</label>`).join('');
+  // 今日清單改唯讀狀態：打勾由「今日菜單」流程自動寫入，跟首頁菜單預覽是同一份資料，不再兩處各養一張清單
+  const items = [['drill', '⚡ 速訓'], ['wrongq', '📓 清錯題'], ['prac', '🎯 刷題 8 題'], ['log', '📊 看數據']];
+  const statusLine = items.map(([k, l]) => `<span class="chip" style="cursor:default">${done[k] ? '✅' : '⬜'} ${l}</span>`).join('');
   const streak = Object.keys(S.daily).filter((d) => Object.values(S.daily[d]).some(Boolean)).length;
   app().innerHTML = `
     <h1>🗓️ 作戰計畫 <span class="dim">距學測 ${days} 天（約 ${weeks} 週）</span></h1>
     <div class="card">
-      <h2>今日清單（每天約 60 分鐘數A）</h2>
+      <h2>今日進度（由「▶ 今日菜單」自動打勾）</h2>
+      <div class="chips">${statusLine}</div>
       <div class="actr"><button class="btn primary big" onclick="startDaily()">▶ 一鍵開始今日菜單</button></div>
-      ${checklist}
-      <p class="dim">已執行 ${streak} 天｜週三、六改打一場模擬。</p>
+      <p class="dim">已執行 ${streak} 天｜週三、六改打一場模擬（每天約 60 分鐘數A）。</p>
     </div>
     <div class="card">
       <h2>三階段路線（現在 → 2027/1/22）</h2>
@@ -4082,13 +3991,6 @@ function renderPlan() {
         <li>檢查順序：選填格式 → 簡單題 → 多選 → 計算最後一步。</li>
       </ol>
     </div>`;
-}
-function toggleTask(k) {
-  const t = today();
-  S.daily[t] = S.daily[t] || {};
-  S.daily[t][k] = !S.daily[t][k];
-  save();
-  renderPlan();
 }
 
 /* ═══════════ ☁️ 雲端同步（Supabase） ═══════════
@@ -4298,13 +4200,11 @@ function flushInkQueue() {
 function syncInk(qid, t0, proc) {
   if (!supa || !syncState.user) return;
   const st = sessionInk[qid]; if (!st) return;
-  // 完整書寫錄影進雲端：計算區(s)＋題目畫記(q)＋答案區(a)＋塗改事件(e)，供後續 AI 統整分析
+  // 完整書寫錄影進雲端：筆畫(s)＋塗改事件(e)，供後續 AI 統整分析（舊列的 q/a 欄位僅歷史資料殘留）
   const strokes = st.s.filter((s) => s.t0 >= t0);
-  const qmarks = (st.q || []).filter((s) => s.t0 >= t0);
-  const answers = (st.a || []).filter((s) => s.t0 >= t0);
   const eras = st.e.filter((t) => t >= t0);
-  if (!strokes.length && !qmarks.length && !answers.length && !eras.length) return;
-  supaInkInsert({ user_id: syncState.user.id, qid, t0, proc: proc || null, strokes: { s: strokes, e: eras, q: qmarks, a: answers } });
+  if (!strokes.length && !eras.length) return;
+  supaInkInsert({ user_id: syncState.user.id, qid, t0, proc: proc || null, strokes: { s: strokes, e: eras } });
 }
 async function syncLogin(isSignup) {
   let email = $('#sy-email').value.trim();
