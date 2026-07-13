@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0713a'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0713b'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -60,6 +60,7 @@ function unionById(inc, cur) {
 /* 題目 schema 驗證：壞一題就可能炸掉整個做題 session，量產內容必混壞題，入庫前逐題過檢 */
 function validateQ(q) {
   if (!q || typeof q.id !== 'string' || !q.id) return 'id 缺漏';
+  if (!/^[\w.:-]+$/.test(q.id)) return 'id 含不合法字元'; // id 會進 inline onclick（jsA），限字元集斷絕注入面（現有題 id 全是英數/-/_/:/. ）
   if (!TOPICS[q.topic]) return `topic「${q.topic}」不存在`;
   if (!['single', 'multi', 'fill'].includes(q.type)) return `type「${q.type}」不合法`;
   if (![1, 2, 3].includes(q.diff)) return `diff「${q.diff}」不合法`;
@@ -945,7 +946,7 @@ function aiCard() {
 function stripTags(s) { return String(s).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
 function escH(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 // 放進 inline onclick 單引號字串裡的 id（extbank 題 id 來源不可控，要跳脫）
-function jsA(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function jsA(s) { return String(s).replace(/&/g, '&amp;').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 // AI 可能回非布林（字串 "false"、"no"…）；!!"false" 會變 true。嚴格判定：只有真正的 true / "true" / 1 才算對。
 function aiCorrect(v) { const c = v && v.correct; return c === true || c === 1 || String(c).trim().toLowerCase() === 'true'; }
 // 難度星星：clamp 到 0..3，避免髒資料 diff（如 4 或 undefined）讓 '☆'.repeat(3-diff) 丟 RangeError 把整個 render 打爆
@@ -1191,8 +1192,41 @@ function fracTxt(s) {
 }
 // 把純文字根號（√數字、係數√數字、√(算式)）轉成 KaTeX \(\sqrt{...}\)。用小 parser 取代舊 regex：
 // 舊版遇到「巢狀根號」√(a+√b) 會拆成島中島＋\sqrt 裡塞 \( 而爆掉；parser 版遞迴處理內層、只包一層島。
+/* ═══ 匯入內容 XSS 防護（白名單清洗） ═══
+   rtTxt 處理的內容字串（q/sol/opts/stem/tip/notes/flash）可能來自匯入的他人題包，直接進 innerHTML＝儲存型 XSS。
+   原則：切出 \(…\) 島原封留給 KaTeX（島內 &、< 是數學語法不可動），只對「島外散文」做白名單標籤＋剝屬性。
+   實測全庫散文只用 <br>/<b>、零屬性，故此清洗對現有內容零副作用。fig/solFig 原始 SVG 走 sanitizeSVG。 */
+const SAN_PROSE_OK = { BR: 1, B: 1, STRONG: 1, I: 1, EM: 1, U: 1, SUP: 1, SUB: 1 };
+const SAN_SVG_OK = { SVG: 1, G: 1, PATH: 1, CIRCLE: 1, ELLIPSE: 1, LINE: 1, POLYLINE: 1, POLYGON: 1, RECT: 1, TEXT: 1, TSPAN: 1, DEFS: 1, MARKER: 1, LINEARGRADIENT: 1, RADIALGRADIENT: 1, STOP: 1, CLIPPATH: 1, PATTERN: 1, TITLE: 1, DESC: 1 };
+const SAN_DANGER = { SCRIPT: 1, STYLE: 1, IFRAME: 1, OBJECT: 1, EMBED: 1, IMG: 1, SVG: 1, MATH: 1, LINK: 1, META: 1, BASE: 1, FORM: 1, INPUT: 1, BUTTON: 1, TEXTAREA: 1, SELECT: 1, VIDEO: 1, AUDIO: 1, SOURCE: 1, CANVAS: 1, FOREIGNOBJECT: 1, A: 1 };
+function domSanitize(html, ok, unwrap) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = String(html);
+  const walk = (parent) => {
+    Array.prototype.slice.call(parent.childNodes).forEach((n) => {
+      if (n.nodeType !== 1) return; // 文字/其他節點原樣保留
+      const tag = n.tagName.toUpperCase();
+      if (!ok[tag]) {
+        if (unwrap && !SAN_DANGER[tag]) { walk(n); n.replaceWith.apply(n, Array.prototype.slice.call(n.childNodes)); } // 良性未知標籤：拆殼保留文字
+        else n.remove(); // 危險標籤，或 SVG 模式的非白名單：整棵丟
+        return;
+      }
+      Array.prototype.slice.call(n.attributes).forEach((a) => {
+        const name = a.name.toLowerCase();
+        if (unwrap || /^on/.test(name) || name === 'href' || name === 'xlink:href' || name === 'src' || name === 'style' || name === 'formaction') n.removeAttribute(a.name);
+      });
+      walk(n);
+    });
+  };
+  walk(tpl.content);
+  return tpl.innerHTML;
+}
+function sanitizeProse(s) { return domSanitize(s, SAN_PROSE_OK, true); }
+function sanitizeSVG(s) { return domSanitize(s, SAN_SVG_OK, false); }
+function sanitizeContent(s) { const parts = String(s).split(/(\\\([\s\S]*?\\\))/); for (let i = 0; i < parts.length; i += 2) parts[i] = sanitizeProse(parts[i]); return parts.join(''); }
 function rtTxt(s) {
-  s = fracTxt(String(s)); // 先把裸分數轉成 \frac 島（必須在下面 √ 逐字解析之前）
+  s = sanitizeContent(String(s)); // 島外散文白名單清洗（擋匯入他人題包的 <img onerror> 等儲存型 XSS）；\(…\) 島原封交給 KaTeX
+  s = fracTxt(s); // 先把裸分數轉成 \frac 島（必須在下面 √ 逐字解析之前）
   let out = '';
   for (let i = 0; i < s.length;) {
     const c = s[i];
@@ -3151,7 +3185,7 @@ function bkCard(q, head, submitFn, actions) {
     <div class="bk-head"><span class="bk-exam">數學Ａ</span><span class="bk-sect">${sectionLabel(q)}</span></div>
     <div class="sheet-tools"><b>✍️ 整張都能寫${q.type === 'fill' ? '，答案寫在最後、圈起來' : ''}</b>${inkToolsHTML()}</div>
     <div class="bk-item"><span class="bk-num">${bkNum(head)}</span>
-      <div class="bk-content">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${q.fig}</div>` : ''}${bkOpts(q, submitFn)}</div></div>
+      <div class="bk-content">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${sanitizeSVG(q.fig)}</div>` : ''}${bkOpts(q, submitFn)}</div></div>
     <div class="write-pad"></div>
     <div class="ansarea">${actions}</div>
     <div id="qfb"></div>
@@ -3183,7 +3217,7 @@ function renderQuestion(q, cfg) {
     ${cfg.review && S.wrong[q.id] && !S.wrong[q.id].grad ? `<p class="dim fs13" style="margin:0 0 4px">📓 上次錯因：${S.wrong[q.id].err || '—'}${S.wrong[q.id].err === '超時' ? `｜⚡ 這次要在 ${fmtSec(target)} 內完成才過關` : ''}</p>` : ''}
     ${timerOn() ? '<div class="timebar"><div id="tbfill" class="timebar-fill"></div></div>' : ''}
     <div id="q-flash" class="ink-flash" style="display:none"></div>
-    ${cfg.redo ? `<div class="card redo-sol"><p><b>📖 解答攤開著——照它的路，自己再走一遍（寫完照樣批改）：</b></p>${rtTxt(q.sol)}${q.solFig ? `<div class="qfig">${q.solFig}</div>` : ''}${q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : ''}${teachBlock(q.id)}</div>` : ''}
+    ${cfg.redo ? `<div class="card redo-sol"><p><b>📖 解答攤開著——照它的路，自己再走一遍（寫完照樣批改）：</b></p>${rtTxt(q.sol)}${q.solFig ? `<div class="qfig">${sanitizeSVG(q.solFig)}</div>` : ''}${q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : ''}${teachBlock(q.id)}</div>` : ''}
     ${bkCard(q, cfg.head, 'qSubmit', actions)}`;
   sessionChrome(true);
   inkStart(q.id, qsess.t0);
@@ -3402,7 +3436,7 @@ function qResolve(ok) {
   let mid = '';
   if (!ok) {
     const errLine = !marked && v && v.firstError ? `<p class="badc" style="margin:8px 0 4px"><b>你這裡跑掉了：</b>${escH(v.firstError)}</p>` : ''; // 有紅圈時 firstError 已是圈的說明；圈畫不出時退回文字錯誤行
-    const method = !v ? `<div class="one-method"><b>一種最簡單的算法：</b>${rtTxt(q.sol)}${q.solFig ? `<div class="qfig">${q.solFig}</div>` : ''}</div>` : ''; // 沒 AI 看手寫時才補完整方法；詳解配圖（solFig）不過 rtTxt
+    const method = !v ? `<div class="one-method"><b>一種最簡單的算法：</b>${rtTxt(q.sol)}${q.solFig ? `<div class="qfig">${sanitizeSVG(q.solFig)}</div>` : ''}</div>` : ''; // 沒 AI 看手寫時才補完整方法；詳解配圖（solFig）不過 rtTxt
     mid = `${praiseHTML}${handImg}${errLine}${lastAdv}${stuckBlock}${method}${nextHTML}`;
   } else if (overtime) {
     mid = `${praiseHTML}${lastAdv}${handImg}${stuckBlock}${nextHTML || (willProc ? '' : '<p class="dim">多做幾次讓步驟變反射就會更快。</p>')}`;
@@ -3410,7 +3444,7 @@ function qResolve(ok) {
     mid = `${praiseHTML}${lastAdv}${handImg}${stuckBlock}${nextHTML}`;
   }
   // ⑤ 完整解說——永遠收起（答對又準時完全不擋路）；只放上面沒秀的部分，避免重複
-  const solInFull = ok ? `<p><b>詳解：</b>${rtTxt(q.sol)}</p>${q.solFig ? `<div class="qfig">${q.solFig}</div>` : ''}` : ''; // 答錯已在上面用人話講過
+  const solInFull = ok ? `<p><b>詳解：</b>${rtTxt(q.sol)}</p>${q.solFig ? `<div class="qfig">${sanitizeSVG(q.solFig)}</div>` : ''}` : ''; // 答錯已在上面用人話講過
   const tipInFull = q.tip && !overtime && !(v && v.nextTime) ? `<p class="tip">💡 <b>快解：</b>${rtTxt(q.tip)}</p>` : ''; // 快解已在上面或當「下次這樣做」用掉就不重複
   const full = `<details class="sol-detail" ontoggle="if(this.open){const b=this.querySelector('#mlib-box');if(b&&!b.innerHTML)showMethods('${q.topic}',true)}">
       <summary class="dim">📖 ${ok ? '完整解說' : '其他解法'}（詳解 · 老師方法 · 回放）</summary>
@@ -3922,13 +3956,13 @@ function wrongCard(id) {
       <span class="wc-due">${isDue ? '<b class="warnc">今天到期</b>' : escH(w.due || '')}</span>
     </summary>
     <div class="wc-body">
-      <div class="wc-q">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${q.fig}</div>` : ''}${q.type !== 'fill' && q.opts ? `<div class="bk-opts">${q.opts.map((o, i) => `<div class="bk-opt"><span class="bk-op">(${i + 1})</span><span>${rtTxt(o)}</span></div>`).join('')}</div>` : ''}</div>
+      <div class="wc-q">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${sanitizeSVG(q.fig)}</div>` : ''}${q.type !== 'fill' && q.opts ? `<div class="bk-opts">${q.opts.map((o, i) => `<div class="bk-opt"><span class="bk-op">(${i + 1})</span><span>${rtTxt(o)}</span></div>`).join('')}</div>` : ''}</div>
       <p class="dim fs13">正解：<b>${q.type === 'fill' ? mDispOpt(String(q.ans[0])) : q.ans.map((a) => `(${a + 1})`).join('')}</b>｜離畢業 <span class="itv-ladder">${ladder}</span>（1→3→7→14 天四關）｜最近：${histLine || '—'}</p>
       ${w.adv && w.adv.fe ? `<p class="badc">✘ 上次你這裡跑掉了：${escH(w.adv.fe)}</p>` : ''}
       ${w.adv && w.adv.nt ? `<div class="next-step"><b>🎯 下次這樣做：</b>${escH(w.adv.nt)}</div>` : (q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : '')}
       <div class="chips r fs13">${ERR_TYPES.map((e) => `<button class="chip ${w.err === e ? 'sel' : ''}" onclick="setWrongErr('${jsA(id)}','${e}',this)">${e}</button>`).join('')}</div>
       <details class="sol-detail"><summary class="dim">📖 詳解 · 老師這樣教</summary>
-        <p>${rtTxt(q.sol)}</p>${q.solFig ? `<div class="qfig">${q.solFig}</div>` : ''}${q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : ''}${teachBlock(q.id)}
+        <p>${rtTxt(q.sol)}</p>${q.solFig ? `<div class="qfig">${sanitizeSVG(q.solFig)}</div>` : ''}${q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : ''}${teachBlock(q.id)}
         <div class="actr"><button class="btn sm" onclick="showMethods('${q.topic}')">🧑‍🏫 調老師方法庫</button></div>
       </details>
       <div class="actr">
@@ -3982,7 +4016,7 @@ function wfShow() {
       <span class="shr"><button class="btn sm xbtn" onclick="exitFlow()">✕</button></span></div>
     <div class="card flashcard" onclick="wfFlip()">
       <p class="dim">${w.err || ''}｜${w.fails > 0 ? '錯 ' + w.fails + ' 次' : '放棄/未作答'}</p>
-      <div class="wc-q" style="text-align:left">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${q.fig}</div>` : ''}${q.type !== 'fill' && q.opts ? `<div class="bk-opts">${q.opts.map((o, i) => `<div class="bk-opt"><span class="bk-op">(${i + 1})</span><span>${rtTxt(o)}</span></div>`).join('')}</div>` : ''}</div>
+      <div class="wc-q" style="text-align:left">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${sanitizeSVG(q.fig)}</div>` : ''}${q.type !== 'fill' && q.opts ? `<div class="bk-opts">${q.opts.map((o, i) => `<div class="bk-opt"><span class="bk-op">(${i + 1})</span><span>${rtTxt(o)}</span></div>`).join('')}</div>` : ''}</div>
       <div id="wf-back" style="display:none;text-align:left">
         <p>正解：<b class="accent big">${q.type === 'fill' ? mDispOpt(String(q.ans[0])) : q.ans.map((a) => `(${a + 1}) ${q.opts ? rtTxt(q.opts[a]) : ''}`).join('、')}</b></p>
         ${w.adv && w.adv.fe ? `<p class="badc">上次你這裡跑掉了：${escH(w.adv.fe)}</p>` : ''}
