@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0713i'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0713j'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -1331,10 +1331,11 @@ const U_WRAP = 'αβγδεζηθικλμνξοπρςστυφχψωϑϕφϖϵ' + 
   + '≃≑≓∶∷≼≽⋚⋛≮≯≰≱≨≩≢≁≇≉≜≝≟'
   + '∐∯∰⨌⊖⊛⊞⊠⨁⨂⨀'
   + '⇏⇎⇍↛↚↮⟷⟼↺↻↪↩⇄'
-  + '∢⦜⟂▭◊⌢⏜∽≌⌀⬠⬡';
+  + '∢⦜⟂▭◊⌢⏜∽≌⌀⬠⬡'
+  + '⟦⟧ℱℬℰℳⅉ⏢⎧⎨⎩⎡⎣⎛⎝';                  // 白括號/花體字母/梯形/大括號延伸片段（PDF 抓取匯入可能出現）
 const U_WRAP_RE = new RegExp('[' + U_WRAP + ']+', 'g');
 // 組合附加符號（x̄ 平均、x⃗ 向量、x̂ 帽…）：CJK 字型多半不會把 mark 疊到 base 上 → 位移/豆腐；轉成 KaTeX \bar{x} 等。
-const U_COMB = { '̄': 'bar', '̅': 'bar', '̂': 'hat', '̃': 'tilde', '̇': 'dot', '̈': 'ddot', '̊': 'mathring', '̆': 'breve', '⃗': 'vec', '⃖': 'overleftarrow', '⃛': 'dddot', '́': 'acute', '̀': 'grave' };
+const U_COMB = { '̄': 'bar', '̅': 'bar', '̂': 'hat', '̃': 'tilde', '̇': 'dot', '̈': 'ddot', '̊': 'mathring', '̆': 'breve', '⃗': 'vec', '⃖': 'overleftarrow', '⃡': 'overleftrightarrow', '⃛': 'dddot', '́': 'acute', '̀': 'grave' };
 const U_COMB_RE = /([A-Za-z0-9Α-ωϑϕϖϵ])([̀-ͯ⃐-⃿])/g; // base 含拉丁/數字/希臘（σ̂ 這種 Greek+mark 也要成 \hat{σ}）
 function _mapU(m, tbl) { let o = ''; for (const c of m) o += (tbl[c] || c); return o; }
 function normUnicodeMath(s) {
