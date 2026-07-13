@@ -2,17 +2,22 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0712h'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0713a'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
 let S = load();
 function load() {
+  const def = { attempts: [], wrong: {}, drills: {}, mocks: [], daily: {}, ver: 1 };
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (p && typeof p === 'object' && !Array.isArray(p)) return { ...def, ...p }; // 補齊缺欄位，防首屏 S.attempts 之類 deref 白屏
+      try { localStorage.setItem(KEY + '_corrupt', raw); } catch (e) {} // 合法 JSON 但形狀不對（被竄改/舊格式寫成 null/陣列/純值）：備份壞值後回乾淨預設，避免磚化且無法自癒
+    }
   } catch (e) {}
-  return { attempts: [], wrong: {}, drills: {}, mocks: [], daily: {}, ver: 1 };
+  return { ...def };
 }
 let saveQuotaErr = false; // 本機 localStorage 滿了（QuotaExceeded）：不炸作答流程，雲端照常同步
 function save() {
@@ -24,7 +29,9 @@ function save() {
 }
 function exportData() {
   // 分家後備份也要帶內容層（__content 欄位；匯入時會還原並剔除，不會污染 S）
-  const payload = splitOn() && Object.keys(CONTENT.packs).length ? { ...S, __content: CONTENT.packs } : S;
+  // 匯出備份不帶 API 金鑰：aikey 是 sk-ant 明文金流憑證，備份 .json 常被 email/貼除錯/雲端硬碟自動同步而外流
+  const { aikey, aikeyTs, ...safe } = S;
+  const payload = splitOn() && Object.keys(CONTENT.packs).length ? { ...safe, __content: CONTENT.packs } : safe;
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -120,6 +127,7 @@ async function idbWriteAll(packs) {
   return new Promise((res, rej) => {
     const tx = db.transaction('packs', 'readwrite');
     const st = tx.objectStore('packs');
+    st.clear(); // 以傳入的 packs 為權威全集：先清再寫，還原/停用備份時舊包才不會殘留復活（唯一呼叫者 persistContent 傳完整 CONTENT.packs）
     for (const k of Object.keys(packs)) st.put(packs[k], k);
     tx.oncomplete = () => res();
     tx.onerror = () => rej(tx.error);
@@ -873,7 +881,7 @@ function praiseFor(q, ok, ms, target, historyOnly) {
   const past = attemptsOf(q.id);
   const msgs = [];
   if (past.some((a) => !a.ok)) msgs.push('這題你之前錯過，這次拿下了——這就是真實的進步');
-  const bestMs = past.length ? Math.min(...past.map((a) => a.ms)) : null;
+  const okPast = past.filter((a) => a.ok); const bestMs = okPast.length ? Math.min(...okPast.map((a) => a.ms)) : null; // 個人最速只算「答對」的作答，別把答錯/放棄的作答時間當成最速基準
   if (bestMs && ms < bestMs) msgs.push(`比你過去最快的一次還快（${fmtSec(ms)} vs ${fmtSec(bestMs)}）`);
   if (!historyOnly) {
     if (q.diff === 3) msgs.push('★★★ 難題，你把它算出來了');
@@ -1248,7 +1256,7 @@ async function showMethods(unit, noScroll) {
 }
 
 function strHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return h.toString(36); }
-function today() { return new Date().toISOString().slice(0, 10); }
+function today() { return new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10); } // 台灣本地日（UTC+8）：日界＝台灣午夜，不是 UTC 午夜（在台灣是早上 8 點）
 /* 純日期加減。一定要全程 UTC：舊版「本地 parse＋UTC 輸出」在台灣（UTC+8）會少一天——
    addDays(x,1) 回傳 x 本身，錯題到期日全部提前、連續天數隔天跳算。 */
 function addDays(dateStr, n) {
@@ -2014,8 +2022,11 @@ function nav(view) {
   stopTicker();
   if (ink) inkStop();
   sessionChrome(false);
-  document.querySelectorAll('nav button').forEach((b) =>
-    b.classList.toggle('active', b.dataset.view === view));
+  document.querySelectorAll('nav button').forEach((b) => {
+    const on = b.dataset.view === view;
+    b.classList.toggle('active', on);
+    if (on) b.scrollIntoView({ inline: 'center', block: 'nearest' }); // 手機 8 分頁橫捲時，切到右側分頁把當前分頁捲進可視範圍，別讓高亮落在畫面外
+  });
   VIEWS[view].fn();
   updateBadge();
 }
