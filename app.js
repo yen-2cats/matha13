@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0713j'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0713k'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -1133,6 +1133,7 @@ function qProcReview(ok) {
   const _pord = inkOrderedShot(q.id); // 給 AI 標書寫順序版；顯示/紅圈仍用上面乾淨 calcB64
   aiProcCall(q, ok, correctTxt, (_pord && _pord.b64) || calcB64, shots, _pord ? _pord.steps : 0)
     .then((v) => {
+      sess.procV = v; // 存起來供「追問這題」對話引用你剛給的點評
       // 持久化：建議與卡點跟著紀錄走（這回應是非同步的——紀錄可能已寫入，rec.p 與 sess.proc 是同一物件參照）
       const adv = advFrom(v);
       const stuck = normStuck(v, shots);
@@ -1156,6 +1157,95 @@ function qProcReview(ok) {
         ${!v.praise && !marked && !v.firstError && !v.nextTime && !stuck.length ? '<p class="dim">過程乾淨，沒什麼好挑的——這題你穩。</p>' : ''}</div>`);
     })
     .catch((e) => { paint(`<p class="dim">（AI 過程分析失敗：${escH((e && e.message) || e)}）</p>`); });
+}
+/* ═══════════ 💬 追問這題（多輪、有 context 記憶的對話） ═══════════
+   位置：批改結果「AI 看手寫過程」下方。帶入題目/正解/對錯/詳解/剛才 AI 點評＋手寫圖為脈絡，
+   之後每輪只追加問答；API 是 stateless→每次送完整 messages（第一則 user 夾手寫圖），故 AI 記得整段對話。 */
+async function aiChatCall(system, messages) {
+  const ctrl = new AbortController();
+  const tmr = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', signal: ctrl.signal, headers: aiAuthHeaders(),
+      body: JSON.stringify({
+        model: (localStorage.getItem(AI_MODEL_LS) || 'claude-opus-4-8'),
+        max_tokens: 1000, thinking: { type: 'disabled' }, system, messages,
+      }),
+    });
+    if (!res.ok) {
+      let msg = 'HTTP ' + res.status;
+      try { const e = await res.json(); if (e && e.error && e.error.message) msg = e.error.message; } catch (_) {}
+      if (res.status === 401) msg = 'key 無效（需 platform.claude.com 的 API key）';
+      else if (res.status === 429) msg = '額度不足或被限流';
+      throw new Error(msg);
+    }
+    const j = await res.json();
+    return (j.content || []).map((c) => c.text || '').join('').trim();
+  } catch (e) {
+    throw (e && e.name === 'AbortError') ? new Error('逾時（60 秒沒回應）') : e;
+  } finally { clearTimeout(tmr); }
+}
+function chatCtx(sess) {
+  const q = sess.q;
+  const correctTxt = q.type === 'fill' ? (q.ans && q.ans[0]) : (Array.isArray(q.ans) ? q.ans.map((a) => '(' + (a + 1) + ')').join('') : '');
+  const v = sess.ai || sess.procV; // 之前的 AI 批改/過程點評（有就帶進脈絡）
+  let prior = '';
+  if (v) {
+    const bits = [];
+    if (v.praise) bits.push('稱讚：' + v.praise);
+    if (v.firstError) bits.push('指出的錯：' + v.firstError);
+    if (v.nextTime) bits.push('建議：' + v.nextTime);
+    if (bits.length) prior = '你剛才給他的點評——' + bits.join('；') + '。';
+  }
+  const system = '你是這位學測數學考生的一對一家教，正跟他討論「他剛做的這一題」。用繁體中文、口語、簡短好懂地回答他的追問；要寫算式時一律用 \\(…\\) 或 $…$ 把數學包起來（介面用 KaTeX 渲染），不要用 markdown 粗體/標題語法。只聚焦這一題與相關概念，別扯遠、別長篇大論。\n\n【這一題】\n題目：' + stripTags(q.q) + '\n正確答案：' + (correctTxt || '（未提供）') + '\n他這次' + (sess.lastOk ? '答對' : '答錯') + '了。\n' + (q.sol ? '參考詳解：' + stripTags(q.sol) + '\n' : '') + prior + (sess.calcImg ? '\n（第一則訊息附了他的手寫過程圖，請對照他實際寫法回答。）' : '');
+  const imgB64 = sess.calcImg ? sess.calcImg.replace(/^data:image\/[a-z]+;base64,/, '') : null;
+  return { system, imgB64 };
+}
+function mountChat(sess) {
+  const el = document.getElementById('ai-chat');
+  if (!el) return;
+  if (!aiKey()) { el.innerHTML = ''; return; } // 沒設 AI key＝不顯示追問
+  const turns = (sess.chat && sess.chat.turns) || [];
+  const log = turns.map((t) => t.role === 'user'
+    ? '<div class="cm cm-u">' + escH(t.text) + '</div>'
+    : '<div class="cm cm-a">' + rtTxt(t.text) + '</div>').join('')
+    + (sess.chatBusy ? '<div class="cm cm-a dim">🤖 想一下…</div>' : '');
+  el.innerHTML = '<div class="ai-chat"><p class="chat-head">💬 <b>追問這題</b> <span class="dim">（可連續問，AI 記得前面的對話）</span></p>'
+    + '<div class="chat-log">' + log + '</div>'
+    + '<div class="chat-in"><textarea id="chatq" rows="1" placeholder="打字問這題任何問題…例如「第二步為什麼可以這樣約分？」"' + (sess.chatBusy ? ' disabled' : '') + '></textarea>'
+    + '<button class="btn primary" onclick="chatSend()"' + (sess.chatBusy ? ' disabled' : '') + '>送出</button></div></div>';
+  el.querySelectorAll('.cm-a').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$', right: '$', display: true }], throwOnError: false }); } catch (e) {} });
+  const ta = el.querySelector('#chatq');
+  if (ta) {
+    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); } }); // Enter 送出、Shift+Enter 換行
+    ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(140, ta.scrollHeight) + 'px'; });
+  }
+  const logEl = el.querySelector('.chat-log'); if (logEl) logEl.scrollTop = logEl.scrollHeight;
+  if (turns.length && ta && !sess.chatBusy) ta.focus();
+}
+async function chatSend() {
+  const sess = qsess;
+  if (!sess || sess.chatBusy || !aiKey()) return;
+  const ta = document.getElementById('chatq');
+  const question = ta ? ta.value.trim() : '';
+  if (!question) return;
+  if (!sess.chat) sess.chat = { turns: [] };
+  sess.chat.turns.push({ role: 'user', text: question });
+  sess.chatBusy = true;
+  mountChat(sess);
+  try {
+    const { system, imgB64 } = chatCtx(sess);
+    const msgs = sess.chat.turns.map((t, i) => (t.role === 'user' && i === 0 && imgB64)
+      ? { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: imgB64 } }, { type: 'text', text: t.text }] }
+      : { role: t.role, content: t.text });
+    const reply = await aiChatCall(system, msgs);
+    sess.chat.turns.push({ role: 'assistant', text: reply || '（沒有回應）' });
+  } catch (e) {
+    sess.chat.turns.push({ role: 'assistant', text: '（追問失敗：' + ((e && e.message) || e) + '）' });
+  } finally {
+    sess.chatBusy = false;
+    if (qsess === sess) mountChat(sess);
+  }
 }
 /* 兩種憑證都支援：sk-ant-api03（API key → x-api-key）與 sk-ant-oat（OAuth token → Bearer） */
 function aiAuthHeaders() {
@@ -3590,13 +3680,15 @@ function qResolve(ok) {
       <div class="mlib" style="margin-top:6px"><div id="mlib-box"></div></div>
       ${qsess.proc && qsess.proc.n ? `<div class="actr">${qsess.stuck && qsess.stuck.length && qsess.stuck[0].at != null ? `<button class="btn sm" onclick="inkReplay('${jsA(q.id)}', ${qsess.t0}, ${qsess.t0 + Math.max(0, (qsess.stuck[0].at - 5)) * 1000})">⏸ 從卡點前回放</button>` : ''}<button class="btn sm" onclick="inkReplay('${jsA(q.id)}', ${qsess.t0})">▶ 回放解題過程</button></div>` : ''}
     </details>`;
-  fb.innerHTML = `<div class="sol graded">${verdict}${reJudge}${action}${mid}<div id="ai-proc"></div>${full}${qsess.exclude ? '<p class="warnc">（依你的選擇，這筆不列入紀錄）</p>' : ''}</div>`;
+  qsess.lastOk = ok; // 供「追問這題」對話帶入本題對錯脈絡
+  fb.innerHTML = `<div class="sol graded">${verdict}${reJudge}${action}${mid}<div id="ai-proc"></div><div id="ai-chat"></div>${full}${qsess.exclude ? '<p class="warnc">（依你的選擇，這筆不列入紀錄）</p>' : ''}</div>`;
   fbInView();
   // 選擇/打字題：答案已判定，但只要有寫手寫過程就讓 AI 看並點評（答對也看——飼主要的就是這個）
   if (aiKey() && !qsess.ai && qsess.proc && qsess.proc.n) {
     const el = document.getElementById('ai-proc');
     if (el) { el.innerHTML = '<p class="dim">🤖 AI 正在看你的手寫過程…（不用等，可先按下一題）</p>'; qProcReview(ok); }
   }
+  mountChat(qsess); // 「追問這題」多輪對話區（有 context 記憶）
 }
 /* 標錯因＝選取，不跳題（詳解/卡點還要看）；「下一題」才前進 */
 function qPickErr(btn, e) {
@@ -3689,6 +3781,7 @@ function sideReturn() {
   sideState = null;
   const el = document.getElementById('ai-proc'); // 支線期間原題的 AI 過程點評若才回來，重新貼上（否則會卡在「正在看…」）
   if (el && qsess.aiProcHTML) el.innerHTML = qsess.aiProcHTML;
+  mountChat(qsess); // 還原「追問這題」對話（回原題後接著問）
 }
 /* 訂正重算中直接「下一題」：還原原題 session（原答案是錯的）→ 記原筆＋前進，不用先繞回原題再選錯因 */
 function qRedoDone() {

@@ -490,6 +490,19 @@ sup .vfrac { font-size: 1em; margin: 0 0.05em; }
 .am-lab { position: absolute; transform: translateY(-115%); background: var(--mark); color: #fff; font-size: 11px; line-height: 1.25; padding: 1px 5px; border-radius: 4px; white-space: nowrap; pointer-events: none; z-index: 1; }
 .am-lab.below { transform: translateY(3px); } /* 靠上緣的框：標籤改放圈內、不被裁掉 */
 .am-cap { color: var(--mark); font-size: 13px; margin: 5px 0 0; }
+/* 💬 追問這題：多輪對話 */
+.ai-chat { margin-top: 14px; border-top: 1px dashed var(--border); padding-top: 10px; }
+.chat-head { margin: 0 0 8px; font-size: 15px; }
+.chat-log { display: flex; flex-direction: column; gap: 8px; max-height: 440px; overflow-y: auto; margin-bottom: 10px; }
+.chat-log:empty { display: none; }
+.cm { max-width: 88%; padding: 8px 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cm-u { align-self: flex-end; background: var(--accent); color: #fff; border-radius: var(--r-m) var(--r-m) 4px var(--r-m); }
+.cm-a { align-self: flex-start; background: var(--panel2); color: var(--text); border-radius: var(--r-m) var(--r-m) var(--r-m) 4px; }
+.cm-a.dim { color: var(--dim); background: transparent; padding-left: 2px; }
+.chat-in { display: flex; gap: 6px; align-items: flex-end; }
+.chat-in textarea { flex: 1; resize: none; padding: 9px 11px; border: 1px solid var(--border); border-radius: 11px; font: inherit; line-height: 1.4; background: var(--panel); color: var(--text); max-height: 140px; overflow-y: auto; }
+.chat-in textarea:focus { outline: none; border-color: var(--accent); }
+.chat-in .btn { flex: none; }
 
 /* 📝 訂正重算：攤開的解答卡 */
 .redo-sol { background: var(--accent-soft); border: 1px solid var(--border); border-left: 4px solid var(--accent); }
