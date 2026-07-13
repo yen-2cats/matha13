@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0713e'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0713f'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -1306,8 +1306,32 @@ function domSanitize(html, ok, unwrap) {
 function sanitizeProse(s) { return domSanitize(s, SAN_PROSE_OK, true); }
 function sanitizeSVG(s) { return domSanitize(s, SAN_SVG_OK, false); }
 function sanitizeContent(s) { const parts = String(s).split(/(\\\([\s\S]*?\\\))/); for (let i = 0; i < parts.length; i += 2) parts[i] = sanitizeProse(parts[i]); return parts.join(''); }
+/* literal Unicode 數學符號救援：匯入的官方試題常把「向量、上下標」寫成純字元
+   （v→、AB→ 應是 \overrightarrow；x₁ 應是 x_1；10ⁿ 應是 10^n），字型沒該字就變方框/或顯示成字母後一個箭頭。
+   這裡在 render 前一律轉成正規渲染，任何來源的內容都救得到（不用改內容檔）。 */
+const U_SUB = { '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9', '₊': '+', '₋': '-', '₌': '=', '₍': '(', '₎': ')' };
+const U_SUP = { '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9', '⁺': '+', '⁻': '-', '⁼': '=', '⁽': '(', '⁾': ')', 'ⁿ': 'n', 'ⁱ': 'i' };
+const U_SUB_RE = new RegExp('[' + Object.keys(U_SUB).join('') + ']+', 'g');
+const U_SUP_RE = new RegExp('[' + Object.keys(U_SUP).join('') + ']+', 'g');
+const U_VEC_RE = /([A-Za-z]{1,3})→(?![A-Za-z0-9])/g; // 字母緊貼 →、且 → 後面不是英數＝向量（排除 A→D 路徑、x→0 極限、有空白的 leads-to）
+function _mapU(m, tbl) { let o = ''; for (const c of m) o += (tbl[c] || c); return o; }
+function normUnicodeMath(s) {
+  const parts = String(s).split(/(\\\([\s\S]*?\\\))/); // 奇數格＝島
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) { // 島內：literal 上下標 → KaTeX _{}/^{}
+      parts[i] = parts[i].replace(U_SUB_RE, (m) => '_{' + _mapU(m, U_SUB) + '}').replace(U_SUP_RE, (m) => '^{' + _mapU(m, U_SUP) + '}');
+    } else { // 島外散文：向量成島、上下標成 <sub>/<sup>
+      parts[i] = parts[i]
+        .replace(U_VEC_RE, (m, g) => '\\(\\overrightarrow{' + g + '}\\)')
+        .replace(U_SUB_RE, (m) => '<sub>' + _mapU(m, U_SUB) + '</sub>')
+        .replace(U_SUP_RE, (m) => '<sup>' + _mapU(m, U_SUP) + '</sup>');
+    }
+  }
+  return parts.join('');
+}
 function rtTxt(s) {
-  s = sanitizeContent(String(s)); // 島外散文白名單清洗（擋匯入他人題包的 <img onerror> 等儲存型 XSS）；\(…\) 島原封交給 KaTeX
+  s = normUnicodeMath(String(s)); // literal 向量箭頭/上下標 → 正規渲染（救匯入內容的方框/箭頭跑位）
+  s = sanitizeContent(s); // 島外散文白名單清洗（擋匯入他人題包的 <img onerror> 等儲存型 XSS）；\(…\) 島原封交給 KaTeX
   s = fracTxt(s); // 先把裸分數轉成 \frac 島（必須在下面 √ 逐字解析之前）
   let out = '';
   for (let i = 0; i < s.length;) {
