@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0714a'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0714b'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -1285,7 +1285,7 @@ async function aiChatCall(system, messages) {
       method: 'POST', signal: ctrl.signal, headers: aiAuthHeaders(),
       body: JSON.stringify({
         model: (localStorage.getItem(AI_MODEL_LS) || 'claude-opus-4-8'),
-        max_tokens: 1000, thinking: { type: 'disabled' }, system, messages,
+        max_tokens: 2000, thinking: { type: 'disabled' }, system, messages, // 1000 會把老師的長回覆截斷在算式中間→留下沒收尾的島（生 LaTeX 外露）
       }),
     });
     if (!res.ok) {
@@ -1313,7 +1313,7 @@ function chatCtx(sess) {
     if (v.nextTime) bits.push('建議：' + v.nextTime);
     if (bits.length) prior = '你剛才給他的點評——' + bits.join('；') + '。';
   }
-  const system = '你是這位學測數學考生的一對一家教，正跟他討論「他剛做的這一題」。用繁體中文、口語、簡短好懂地回答他的追問；要寫算式時一律用 \\(…\\) 或 $…$ 把數學包起來（介面用 KaTeX 渲染），不要用 markdown 粗體/標題語法。只聚焦這一題與相關概念，別扯遠、別長篇大論。\n\n【這一題】\n題目：' + stripTags(q.q) + '\n正確答案：' + (correctTxt || '（未提供）') + '\n他這次' + (sess.lastOk ? '答對' : '答錯') + '了。\n' + (q.sol ? '參考詳解：' + stripTags(q.sol) + '\n' : '') + prior + (sess.calcImg ? '\n（第一則訊息附了他的手寫過程圖，請對照他實際寫法回答。）' : '');
+  const system = '你是這位學測數學考生的一對一家教，正跟他討論「他剛做的這一題」。用繁體中文、口語、簡短好懂地回答他的追問；要寫算式時一律用 \\(…\\) 把數學包起來、每個 \\( 都要有 \\) 收尾（介面用 KaTeX 渲染），不要用 markdown 粗體/標題語法。斷言任何數值或答案前先自己重算驗證（log/根號/正負號/比大小易錯），沒把握寧可說不確定，別給錯答案誤導他。只聚焦這一題與相關概念，別扯遠、別長篇大論。\n\n【這一題】\n題目：' + stripTags(q.q) + '\n正確答案：' + (correctTxt || '（未提供）') + '\n他這次' + (sess.lastOk ? '答對' : '答錯') + '了。\n' + (q.sol ? '參考詳解：' + stripTags(q.sol) + '\n' : '') + prior + (sess.calcImg ? '\n（第一則訊息附了他的手寫過程圖，請對照他實際寫法回答。）' : '');
   const imgB64 = sess.calcImg ? sess.calcImg.replace(/^data:image\/[a-z]+;base64,/, '') : null;
   return { system, imgB64 };
 }
@@ -1324,13 +1324,13 @@ function mountChat(sess) {
   const turns = (sess.chat && sess.chat.turns) || [];
   const log = turns.map((t) => t.role === 'user'
     ? '<div class="cm cm-u">' + escH(t.text) + '</div>'
-    : '<div class="cm cm-a">' + rtTxt(t.text) + '</div>').join('')
+    : '<div class="cm cm-a">' + rtAi(t.text) + '</div>').join('')
     + (sess.chatBusy ? '<div class="cm cm-a dim">🤖 想一下…</div>' : '');
   el.innerHTML = '<div class="ai-chat"><p class="chat-head">💬 <b>追問這題</b> <span class="dim">（可連續問，AI 記得前面的對話）</span></p>'
     + '<div class="chat-log">' + log + '</div>'
     + '<div class="chat-in"><textarea id="chatq" rows="1" placeholder="打字問這題任何問題…例如「第二步為什麼可以這樣約分？」"' + (sess.chatBusy ? ' disabled' : '') + '></textarea>'
     + '<button class="btn primary" onclick="chatSend()"' + (sess.chatBusy ? ' disabled' : '') + '>送出</button></div></div>';
-  el.querySelectorAll('.cm-a').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$', right: '$', display: true }], throwOnError: false }); } catch (e) {} });
+  el.querySelectorAll('.cm-a').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$$', right: '$$', display: true }], throwOnError: false }); } catch (e) {} });
   const ta = el.querySelector('#chatq');
   if (ta) {
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); } }); // Enter 送出、Shift+Enter 換行
@@ -1589,6 +1589,28 @@ function matTxt(s) {
     return '\\(\\begin{bmatrix}' + cells.map((row) => row.join(' & ')).join(' \\\\ ') + '\\end{bmatrix}\\)';
   })).join('');
 }
+/* AI 生成文字的數學界定符修復。模型常做兩件會炸渲染的事：
+   (1) 混用 $…$ 與 \(…\)，甚至開 \( 用 $ 收（\(AM$）；(2) 被 max_tokens 截斷，留下沒收尾的島（\(=A\cdot）。
+   這種不成對/不平衡的島直接進 KaTeX auto-render → 整段渲不出來，畫面就冒出生的 \( $ \cdot＝使用者看到的「亂碼」。
+   解法：單一 toggle 掃過全文，把所有界定符正規化成「成對、平衡」的 \(…\)——
+   \( 進數學、\) 出數學、$/$$/\[ \] 都當數學開關、島內再遇 \( 忽略（模型漏收）、島外落單的 \) 當普通右括號、收尾若還在島內就補 \)。
+   只動界定符與 markdown 記號，不解 entity、不引入 < → 後面 rtTxt 的 sanitize/escIsland 仍照常擋 XSS。 */
+function fixAiMath(s) {
+  s = String(s == null ? '' : s);
+  s = s.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`\n]+)`/g, '$1'); // 模型偶爾漏的 markdown 粗體/行內碼記號
+  let out = '', inMath = false, i = 0; const n = s.length;
+  while (i < n) {
+    const c = s[i], d = s[i + 1];
+    if (c === '\\' && (d === '(' || d === '[')) { if (!inMath) { out += '\\('; inMath = true; } i += 2; continue; }
+    if (c === '\\' && (d === ')' || d === ']')) { if (inMath) { out += '\\)'; inMath = false; } else { out += d; } i += 2; continue; }
+    if (c === '$' && d === '$') { out += inMath ? '\\)' : '\\('; inMath = !inMath; i += 2; continue; }
+    if (c === '$') { out += inMath ? '\\)' : '\\('; inMath = !inMath; i += 1; continue; }
+    out += c; i += 1;
+  }
+  if (inMath) out += '\\)'; // 收尾未關的島（多半是被 max_tokens 截斷）→ 補上，讓 KaTeX 至少渲得出、不外露生 LaTeX
+  return out;
+}
+function rtAi(s) { return rtTxt(fixAiMath(s)); } // AI 產出的文字一律走這條：先修界定符再照常渲染
 function rtTxt(s) {
   s = matTxt(String(s)); // 壓扁的 [[…],[…]] 矩陣 → 立體 bmatrix 島（要在 normUnicodeMath/sanitize 前，之後照島處理）
   s = normUnicodeMath(s); // literal 向量箭頭/上下標 → 正規渲染（救匯入內容的方框/箭頭跑位）
@@ -3291,8 +3313,8 @@ function drillAiReview(it, ansTxt) {
     .then((r) => {
       if (!drill || drill.qid !== dk) return; // 已換題：丟棄
       const s = document.getElementById('drill-ai'); if (!s) return;
-      s.innerHTML = '<div class="ai-fb" style="margin-top:6px"><p><b>🤖 AI 看你的手寫：</b></p><div class="dai-body">' + rtTxt(r || '（沒有回應）') + '</div></div>';
-      s.querySelectorAll('.dai-body').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$', right: '$', display: true }], throwOnError: false }); } catch (e) {} });
+      s.innerHTML = '<div class="ai-fb" style="margin-top:6px"><p><b>🤖 AI 看你的手寫：</b></p><div class="dai-body">' + rtAi(r || '（沒有回應）') + '</div></div>';
+      s.querySelectorAll('.dai-body').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$$', right: '$$', display: true }], throwOnError: false }); } catch (e) {} });
     })
     .catch((e) => { if (drill && drill.qid === dk) { const s = document.getElementById('drill-ai'); if (s) s.innerHTML = '<p class="dim">（AI 批改失敗：' + escH((e && e.message) || e) + '）</p>'; } });
 }
@@ -3693,9 +3715,9 @@ async function qHint() {
     const prior = sess.hints.length ? '\n（你之前已提示過，接著往下、換個角度、別重複）：\n' + sess.hints.map((h, i) => (i + 1) + '. ' + h).join('\n') : '';
     const system = '你是陪考生即時解題的數學家教。學生正在算這一題、卡住了，傳來他目前的手寫過程。任務：\n'
       + '1) 先看懂他寫到哪、判斷他的方向可不可行。\n'
-      + '2) 方向可行→順著他的寫法給「下一步」的關鍵提示；若看到他哪一步算錯，具體點出（引用他寫的式子）。\n'
+      + '2) 方向可行→順著他的寫法給「下一步」的關鍵提示；若看到他哪一步算錯，具體點出（引用他寫的式子）——但點錯之前先自己重算確認他真的錯了（log/根號/正負號易誤判），別把他算對的說成錯。\n'
       + '3) 方向不可行或太繞太花時間→直白說原因，建議一個更好走的方向。\n'
-      + '鐵則：只給「剛好夠他自己往下走」的一點提示、循序漸進；**絕對不要**寫出完整解法或最終答案（會毀了練習）。繁體中文、口語、簡短（最多 3 句）。數學式用 \\(…\\) 包起來。';
+      + '鐵則：只給「剛好夠他自己往下走」的一點提示、循序漸進；絕對不要寫出完整解法或最終答案（會毀了練習）。繁體中文、口語、簡短（最多 3 句）。數學式用 \\(…\\) 包起來、每個 \\( 都要有 \\) 收尾。';
     const usr = (b64 ? '這是我目前的手寫。' : '我還沒動筆、不知道怎麼下手。') + '我卡住了，給我一點提示（不要直接給我答案）。' + prior;
     const content = [];
     if (b64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } });
@@ -3720,10 +3742,10 @@ function renderHints() {
     + '<div class="hint-head" onclick="qsess.hintCollapsed=!qsess.hintCollapsed;renderHints()" title="點一下折疊／展開">'
     + '<span>💡 提示' + (collapsed ? '（' + hints.length + ' 則，點開看）' : '（一步一步來，不是完整答案）') + '</span>'
     + '<span class="hint-chevron">' + (collapsed ? '▸' : '▾') + '</span></div>'
-    + (collapsed ? '' : (hints.map((h, i) => '<div class="hint-item"><b>' + (i + 1) + '.</b> ' + rtTxt(h) + '</div>').join('')
+    + (collapsed ? '' : (hints.map((h, i) => '<div class="hint-item"><b>' + (i + 1) + '.</b> ' + rtAi(h) + '</div>').join('')
         + (qsess.hintBusy ? '<p class="dim">🤖 看你的手寫、想提示中…</p>' : '<div class="actr"><button class="btn sm" onclick="qHint()">再給一點提示</button></div>')))
     + '</div>';
-  if (!collapsed) el.querySelectorAll('.hint-item').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$', right: '$', display: true }], throwOnError: false }); } catch (e) {} });
+  if (!collapsed) el.querySelectorAll('.hint-item').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$$', right: '$$', display: true }], throwOnError: false }); } catch (e) {} });
 }
 function qSubmit(optIdx) {
   if (!qsess || qsess.locked) return;
@@ -4869,11 +4891,11 @@ function renderTutor() {
 function mountTutorChat() {
   const el = document.getElementById('tutor-chat'); if (!el) return;
   const turns = tutorChat.turns;
-  const log = turns.map((t) => t.role === 'user' ? '<div class="cm cm-u">' + escH(t.text) + '</div>' : '<div class="cm cm-a">' + rtTxt(t.text) + '</div>').join('') + (tutorChat.busy ? '<div class="cm cm-a dim">🧑‍🏫 老師看你的紀錄＋手寫中…</div>' : '');
+  const log = turns.map((t) => t.role === 'user' ? '<div class="cm cm-u">' + escH(t.text) + '</div>' : '<div class="cm cm-a">' + rtAi(t.text) + '</div>').join('') + (tutorChat.busy ? '<div class="cm cm-a dim">🧑‍🏫 老師看你的紀錄＋手寫中…</div>' : '');
   el.innerHTML = `<div class="ai-chat"><div class="chat-log">${log || '<p class="dim fs13">問老師任何關於你學習的事…</p>'}</div>
     <div class="chat-in"><textarea id="tutorq" rows="2" placeholder="例：我最近進步了嗎？哪個單元最該補？我為什麼老在正負號出錯？接下來一週該怎麼練？" ${tutorChat.busy ? 'disabled' : ''}></textarea>
     <button class="btn primary" onclick="tutorSend()" ${tutorChat.busy ? 'disabled' : ''}>問老師</button></div></div>`;
-  el.querySelectorAll('.cm-a').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$', right: '$', display: true }], throwOnError: false }); } catch (e) {} });
+  el.querySelectorAll('.cm-a').forEach((n) => { try { renderMathInElement(n, { delimiters: [{ left: '\\(', right: '\\)', display: false }, { left: '$$', right: '$$', display: true }], throwOnError: false }); } catch (e) {} });
   const ta = el.querySelector('#tutorq');
   if (ta) { ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); tutorSend(); } }); const lg = el.querySelector('.chat-log'); if (lg) lg.scrollTop = lg.scrollHeight; if (turns.length && !tutorChat.busy) ta.focus(); }
 }
@@ -4884,7 +4906,9 @@ async function tutorSend() {
   tutorChat.busy = true; mountTutorChat();
   try {
     if (!tutorChat.hwReady) { try { tutorChat.hw = await tutorHandwriting(6); } catch (e) { tutorChat.hw = []; } tutorChat.hwReady = true; }
-    const system = '你是這位學測數學A考生的長期一對一家教，很了解他、講話直接但溫暖。根據下面「他的完整學習檔案」跟他討論學習狀況、指出你看到的模式與盲點、給「具體、可執行、這週就能做」的調整建議（別空泛、別只會叫他多練）。要寫算式一律用 \\(…\\) 包起來，不要用 markdown 粗體/標題。\n\n【他的學習檔案】\n' + buildTutorDigest() + (tutorChat.hw && tutorChat.hw.length ? '\n\n（第一則訊息另附他最近幾題答錯的手寫圖，每張前面都標了題目，供你看他實際怎麼寫、怎麼錯。）' : '');
+    const system = '你是這位學測數學A考生的長期一對一家教，很了解他、講話直接但溫暖。根據下面「他的完整學習檔案」跟他討論學習狀況、指出你看到的模式與盲點、給「具體、可執行、這週就能做」的調整建議（別空泛、別只會叫他多練）。要寫算式一律用 \\(…\\) 包起來（每個 \\( 一定要有對應的 \\) 收尾），不要用 markdown 粗體/標題。'
+      + '\n⚠️數學鐵則：斷言任何數值、答案或大小順序前，務必自己一步步獨立重算驗證一遍（log、根號、指對數、正負號、比大小最容易錯——例如 \\(\\tfrac12\\log2\\approx0.15\\) 不是 0.165）；沒把握就明講「這裡你自己再確認」，絕不硬給。你是看他的手寫照片、可能認錯字，引用他寫的數字要留餘地、別當定論，也別幫他背書說「你算對了」除非你已重算確認。你的價值是點出他的解題模式與盲點，不是替他宣布答案；真要給答案務必先驗算。'
+      + '\n\n【他的學習檔案】\n' + buildTutorDigest() + (tutorChat.hw && tutorChat.hw.length ? '\n\n（第一則訊息另附他最近幾題答錯的手寫圖，每張前面都標了題目，供你看他實際怎麼寫、怎麼錯。）' : '');
     const msgs = tutorChat.turns.map((t, i) => {
       if (t.role === 'user' && i === 0 && tutorChat.hw && tutorChat.hw.length) {
         const content = [{ type: 'text', text: t.text }];
