@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0714b'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0714c'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -959,8 +959,8 @@ function stuckHTML(stuck) {
   return `<div class="stuck-box"><p class="stuck-title"><b>🧠 你卡住的地方</b></p>
     ${stuck.map((s) => `<div class="stuck-row">
       <span class="stuck-at">第 ${s.at != null ? s.at : '?'} 秒<br>停 ${s.dur != null ? s.dur : '?'} 秒</span>
-      <div class="stuck-body">${s.ph ? `<span class="stuck-ph">${escH(s.ph)}</span>` : ''}<p>${escH(s.what)}</p>
-      ${s.fix ? `<p class="stuck-fix">💡 ${escH(s.fix)}</p>` : ''}</div></div>`).join('')}</div>`;
+      <div class="stuck-body">${s.ph ? `<span class="stuck-ph">${rtAi(s.ph)}</span>` : ''}<p>${rtAi(s.what)}</p>
+      ${s.fix ? `<p class="stuck-fix">💡 ${rtAi(s.fix)}</p>` : ''}</div></div>`).join('')}</div>`;
 }
 function mergeProc(a, b) {
   if (!a) return b;
@@ -1265,10 +1265,10 @@ function qProcReview(ok) {
       if (adv || (stuck.length && sess.proc)) save();
       // 手算改畫在「原本的書寫層」上（AI 紅框對得到位置、還能繼續加寫）——不再另貼截圖
       paint(`<div class="ai-fb"><p><b>🤖 AI 看你的手寫過程：</b></p>
-        ${v.praise ? `<p class="praise">🎉 你做得好：${escH(v.praise)}</p>` : ''}
-        ${v.firstError ? `<p class="badc"><b>你這裡跑掉了：</b>${escH(v.firstError)}</p>` : ''}
+        ${v.praise ? `<p class="praise">🎉 你做得好：${rtAi(v.praise)}</p>` : ''}
+        ${v.firstError ? `<p class="badc"><b>你這裡跑掉了：</b>${rtAi(v.firstError)}</p>` : ''}
         ${stuckHTML(stuck)}
-        ${v.nextTime ? `<div class="next-step"><b>🎯 下次這樣做：</b>${escH(v.nextTime)}</div>` : ''}
+        ${v.nextTime ? `<div class="next-step"><b>🎯 下次這樣做：</b>${rtAi(v.nextTime)}</div>` : ''}
         ${!v.praise && !v.firstError && !v.nextTime && !stuck.length ? '<p class="dim">過程乾淨，沒什麼好挑的——這題你穩。</p>' : ''}</div>`);
       if (qsess === sess) resumeWithMarks(q.id, v.marks, sess.markBox); // 把 AI 框畫在原字上、恢復書寫層可繼續加寫
     })
@@ -1406,9 +1406,9 @@ async function aiTest() {
 function aiFeedbackHTML(v) {
   if (!v) return '';
   return `<div class="ai-fb"><p><b>🤖 AI 批改：</b>讀到你的答案「<b>${v.read != null ? escH(v.read) : '—'}</b>」→ 判定 ${aiCorrect(v) ? '<span class="okc">答對 ✔</span>' : '<span class="badc">答錯 ✘</span>'}</p>
-    ${v.firstError ? `<p class="badc"><b>從這裡開始錯：</b>${escH(v.firstError)}</p>` : ''}
-    ${v.praise ? `<p class="praise">🎉 ${escH(v.praise)}</p>` : ''}
-    ${v.nextTime ? `<div class="next-step"><b>🎯 下次這樣做：</b>${escH(v.nextTime)}</div>` : ''}</div>`;
+    ${v.firstError ? `<p class="badc"><b>從這裡開始錯：</b>${rtAi(v.firstError)}</p>` : ''}
+    ${v.praise ? `<p class="praise">🎉 ${rtAi(v.praise)}</p>` : ''}
+    ${v.nextTime ? `<div class="next-step"><b>🎯 下次這樣做：</b>${rtAi(v.nextTime)}</div>` : ''}</div>`;
 }
 
 /* ═══════════ 🧑‍🏫 老師方法庫（1662 條，Supabase teacher_methods 表） ═══════════
@@ -1601,10 +1601,20 @@ function fixAiMath(s) {
   let out = '', inMath = false, i = 0; const n = s.length;
   while (i < n) {
     const c = s[i], d = s[i + 1];
+    if (c === '\\' && d === '\\') { out += '\\\\'; i += 2; continue; } // LaTeX 換行 \\、列距 \\[6pt] 原樣過（別把第二個 \ 當島界定符起手）
+    if (c === '\\' && d === '$') { out += '$'; i += 2; continue; }     // 跳脫貨幣 \$ → 字面 $，不開假島
     if (c === '\\' && (d === '(' || d === '[')) { if (!inMath) { out += '\\('; inMath = true; } i += 2; continue; }
     if (c === '\\' && (d === ')' || d === ']')) { if (inMath) { out += '\\)'; inMath = false; } else { out += d; } i += 2; continue; }
-    if (c === '$' && d === '$') { out += inMath ? '\\)' : '\\('; inMath = !inMath; i += 2; continue; }
-    if (c === '$') { out += inMath ? '\\)' : '\\('; inMath = !inMath; i += 1; continue; }
+    if (c === '$' && d === '$') { // $$ 顯示界定
+      if (inMath) { out += '\\)'; inMath = false; i += 2; continue; }               // 島內遇 $$＝收島（含 \(…$$ 混用）
+      if (s.indexOf('$$', i + 2) !== -1) { out += '\\('; inMath = true; i += 2; continue; } // 後面有配對才開島
+      out += '$$'; i += 2; continue;                                                // 落單 $$ → 字面
+    }
+    if (c === '$') { // 單一 $
+      if (inMath) { out += '\\)'; inMath = false; i += 1; continue; }               // 島內遇 $＝收島（修「開 \( 卻用 $ 收」的 \(AM$）
+      if (s.indexOf('$', i + 1) !== -1) { out += '\\('; inMath = true; i += 1; continue; } // 後面有配對 $ 才開島
+      out += '$'; i += 1; continue;                                                 // 落單 $（貨幣/截斷）→ 字面，不吞後面散文（避免回歸）
+    }
     out += c; i += 1;
   }
   if (inMath) out += '\\)'; // 收尾未關的島（多半是被 max_tokens 截斷）→ 補上，讓 KaTeX 至少渲得出、不外露生 LaTeX
@@ -2347,7 +2357,7 @@ function homeInsights() {
     if (a.p && a.p.stuck && a.p.stuck.length) {
       const q = bankById(a.qid);
       const s = a.p.stuck[0];
-      stuck.push(`<li>${q ? TOPICS[q.topic] + '：' : ''}${escH(s.what)}${s.fix ? `　<span class="okc">💡 ${escH(s.fix)}</span>` : ''}</li>`);
+      stuck.push(`<li>${q ? TOPICS[q.topic] + '：' : ''}${rtAi(s.what)}${s.fix ? `　<span class="okc">💡 ${rtAi(s.fix)}</span>` : ''}</li>`);
     }
   }
   if (!g && !stuck.length) return '';
@@ -3306,7 +3316,7 @@ function drillAiReview(it, ansTxt) {
   const dk = drill.qid;
   const slot = document.getElementById('drill-ai');
   if (slot) slot.innerHTML = '<p class="dim" style="margin-top:6px">🤖 AI 看你的手寫哪裡錯…（不用等，可先按下一題）</p>';
-  const system = '你是數學速算家教。這是一題速算選擇題，學生答錯了，傳來他的手寫過程。任務：以他自己寫的數字/算法判讀（別硬套別種算法），簡短（最多 3 句）指出他從哪一步開始算錯（引用他寫的式子），再教一個正確又快的算法。繁體中文、口語。數學式用 \\(…\\) 包起來。';
+  const system = '你是數學速算家教。這是一題速算選擇題，學生答錯了，傳來他的手寫過程。任務：以他自己寫的數字/算法判讀（別硬套別種算法），簡短（最多 3 句）指出他從哪一步開始算錯（引用他寫的式子），再教一個正確又快的算法。指出他哪步錯之前先自己重算確認他真的錯了（別把他算對的說成錯）；你教的快解算出的數值/答案也要自己驗過再寫。繁體中文、口語。數學式用 \\(…\\) 包起來、每個 \\( 都要有 \\) 收尾。';
   const content = [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
     { type: 'text', text: '題目：' + stripTags(it.q) + '\n正確答案：' + ansTxt + '（他答錯了）。指出他哪裡錯＋教正確快解。' }];
   aiChatCall(system, [{ role: 'user', content }])
@@ -3590,7 +3600,7 @@ function pracDone() {
     if (a.p && Array.isArray(a.p.stuck)) for (const s of a.p.stuck) roundStuck.push({ topic: (bankById(a.qid) || {}).topic, ...s });
   }
   const stuckRecap = roundStuck.length ? `<div class="stuck-box"><p class="stuck-title"><b>🧠 本輪卡點</b></p>
-    ${roundStuck.slice(0, 4).map((s) => `<p style="margin:3px 0">${s.topic ? TOPICS[s.topic] + '：' : ''}${escH(s.what || '')}${s.dur ? `（停 ${s.dur}s）` : ''}${s.fix ? ` <span class="okc">💡 ${escH(s.fix)}</span>` : ''}</p>`).join('')}</div>` : '';
+    ${roundStuck.slice(0, 4).map((s) => `<p style="margin:3px 0">${s.topic ? TOPICS[s.topic] + '：' : ''}${rtAi(s.what || '')}${s.dur ? `（停 ${s.dur}s）` : ''}${s.fix ? ` <span class="okc">💡 ${rtAi(s.fix)}</span>` : ''}</p>`).join('')}</div>` : '';
   app().innerHTML = `
     <h1>刷題結果</h1>
     ${dailyBanner(3)}
@@ -3717,7 +3727,7 @@ async function qHint() {
       + '1) 先看懂他寫到哪、判斷他的方向可不可行。\n'
       + '2) 方向可行→順著他的寫法給「下一步」的關鍵提示；若看到他哪一步算錯，具體點出（引用他寫的式子）——但點錯之前先自己重算確認他真的錯了（log/根號/正負號易誤判），別把他算對的說成錯。\n'
       + '3) 方向不可行或太繞太花時間→直白說原因，建議一個更好走的方向。\n'
-      + '鐵則：只給「剛好夠他自己往下走」的一點提示、循序漸進；絕對不要寫出完整解法或最終答案（會毀了練習）。繁體中文、口語、簡短（最多 3 句）。數學式用 \\(…\\) 包起來、每個 \\( 都要有 \\) 收尾。';
+      + '鐵則：只給「剛好夠他自己往下走」的一點提示、循序漸進；絕對不要寫出完整解法或最終答案（會毀了練習）。任何你講出的中間數值/等式，寫出前先自己心算驗過一遍（log/根號/正負號易錯），別給錯的中間值把他帶歪。繁體中文、口語、簡短（最多 3 句）。數學式用 \\(…\\) 包起來、每個 \\( 都要有 \\) 收尾。';
     const usr = (b64 ? '這是我目前的手寫。' : '我還沒動筆、不知道怎麼下手。') + '我卡住了，給我一點提示（不要直接給我答案）。' + prior;
     const content = [];
     if (b64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } });
@@ -3891,13 +3901,13 @@ function qResolve(ok) {
   // 複習模式的跨次對照：上次的卡點/建議 vs 這次（需求5：同一步跌倒兩次＝你的洞）
   let lastAdv = '';
   if (w && w.adv) {
-    if (ok && w.adv.nt) lastAdv = `<p class="praise">🎯 上次的建議「${escH(w.adv.nt)}」——這次你做到了。</p>`;
+    if (ok && w.adv.nt) lastAdv = `<p class="praise">🎯 上次的建議「${rtAi(w.adv.nt)}」——這次你做到了。</p>`;
     else if (!ok) {
       const parts = [];
-      if (w.adv.fe) parts.push(`上次卡在：${escH(w.adv.fe)}`);
-      if (v && v.firstError) parts.push(`這次卡在：${escH(v.firstError)}`);
+      if (w.adv.fe) parts.push(`上次卡在：${rtAi(w.adv.fe)}`);
+      if (v && v.firstError) parts.push(`這次卡在：${rtAi(v.firstError)}`);
       if (parts.length === 2) parts.push('<b>對照一下——若是同一步，那就是你的洞：先到下面「老師方法」補這個概念再測。</b>');
-      else if (w.adv.nt) parts.push(`上次的建議：${escH(w.adv.nt)}`);
+      else if (w.adv.nt) parts.push(`上次的建議：${rtAi(w.adv.nt)}`);
       lastAdv = parts.length ? `<p class="badc">${parts.join('<br>')}</p>` : '';
     }
   }
@@ -3920,8 +3930,8 @@ function qResolve(ok) {
   // ④ 中段（批改的靈魂）：先肯定你做得好的 → 錯在哪（圈在你字上）→ 🧠 卡在哪 → 🎯 下次這樣做。詳解不塞這、收摺疊。
   const willProc = aiKey() && !v && qsess.proc && qsess.proc.n; // 選擇/打字題稍後由 AI 過程點評接手稱讚＋下次，這裡就不重複
   // 史實類稱讚（曾錯今對/破個人最速）AI 看不到，永遠保留；AI 在場時當下類交給 AI 講
-  const praiseHTML = (v && v.praise ? `<p class="praise">🎉 你做得好：${escH(v.praise)}</p>` : '') + praiseFor(q, ok, ms, target, !!(v || willProc));
-  const nextTxt = v && v.nextTime ? escH(v.nextTime) : (!willProc && q.tip ? rtTxt(q.tip) : '');
+  const praiseHTML = (v && v.praise ? `<p class="praise">🎉 你做得好：${rtAi(v.praise)}</p>` : '') + praiseFor(q, ok, ms, target, !!(v || willProc));
+  const nextTxt = v && v.nextTime ? rtAi(v.nextTime) : (!willProc && q.tip ? rtTxt(q.tip) : '');
   const nextHTML = nextTxt ? `<div class="next-step"><b>🎯 下次這樣做：</b>${nextTxt}</div>` : '';
   // 🧠 卡點：AI 有回就用 AI 的語意判讀；沒 AI 時退本地啟發式（位置分類）。willProc 時交給 #ai-proc 顯示，不重複。
   if (!qsess.stuck) {
@@ -3935,7 +3945,7 @@ function qResolve(ok) {
   const handImg = ''; // 手算改畫在「原本的書寫層」上（AI 紅框對得到位置、還能繼續加寫）——不再另貼一張截圖，你就對得到了
   let mid = '';
   if (!ok) {
-    const errLine = v && v.firstError ? `<p class="badc" style="margin:8px 0 4px"><b>你這裡跑掉了：</b>${escH(v.firstError)}</p>` : ''; // 畫布上的紅框圈「哪裡」，這行講「錯什麼」
+    const errLine = v && v.firstError ? `<p class="badc" style="margin:8px 0 4px"><b>你這裡跑掉了：</b>${rtAi(v.firstError)}</p>` : ''; // 畫布上的紅框圈「哪裡」，這行講「錯什麼」
     const method = !v ? `<div class="one-method"><b>一種最簡單的算法：</b>${rtTxt(q.sol)}${q.solFig ? `<div class="qfig">${sanitizeSVG(q.solFig)}</div>` : ''}</div>` : ''; // 沒 AI 看手寫時才補完整方法；詳解配圖（solFig）不過 rtTxt
     mid = `${praiseHTML}${handImg}${errLine}${lastAdv}${stuckBlock}${method}${nextHTML}`;
   } else if (overtime) {
@@ -4403,7 +4413,7 @@ function mockFinal() {
   const aiNotes = mock.aiv ? paper.map((q) => {
     const v = mock.aiv[q.id];
     if (!v || (!v.firstError && !v.nextTime)) return '';
-    return `<li>${TOPICS[q.topic]}：${v.firstError ? `<b>從這裡開始錯</b>——${escH(v.firstError)}` : ''}${v.nextTime ? `${v.firstError ? '<br>' : ''}🎯 下次：${escH(v.nextTime)}` : ''}</li>`;
+    return `<li>${TOPICS[q.topic]}：${v.firstError ? `<b>從這裡開始錯</b>——${rtAi(v.firstError)}` : ''}${v.nextTime ? `${v.firstError ? '<br>' : ''}🎯 下次：${rtAi(v.nextTime)}` : ''}</li>`;
   }).filter(Boolean).join('') : '';
   const rows = detail.map((x) => `
     <tr><td>${TOPICS[x.q.topic]} ${starF(x.q.diff)}</td>
@@ -4488,8 +4498,8 @@ function wrongCard(id) {
     <div class="wc-body">
       <div class="wc-q">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${sanitizeSVG(q.fig)}</div>` : ''}${q.type !== 'fill' && q.opts ? `<div class="bk-opts">${q.opts.map((o, i) => `<div class="bk-opt"><span class="bk-op">(${i + 1})</span><span>${rtTxt(o)}</span></div>`).join('')}</div>` : ''}</div>
       <p class="dim fs13">正解：<b>${q.type === 'fill' ? mDispOpt(String(q.ans[0])) : q.ans.map((a) => `(${a + 1})`).join('')}</b>｜離畢業 <span class="itv-ladder">${ladder}</span>（1→3→7→14 天四關）｜最近：${histLine || '—'}</p>
-      ${w.adv && w.adv.fe ? `<p class="badc">✘ 上次你這裡跑掉了：${escH(w.adv.fe)}</p>` : ''}
-      ${w.adv && w.adv.nt ? `<div class="next-step"><b>🎯 下次這樣做：</b>${escH(w.adv.nt)}</div>` : (q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : '')}
+      ${w.adv && w.adv.fe ? `<p class="badc">✘ 上次你這裡跑掉了：${rtAi(w.adv.fe)}</p>` : ''}
+      ${w.adv && w.adv.nt ? `<div class="next-step"><b>🎯 下次這樣做：</b>${rtAi(w.adv.nt)}</div>` : (q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : '')}
       <div class="chips r fs13">${ERR_TYPES.map((e) => `<button class="chip ${w.err === e ? 'sel' : ''}" onclick="setWrongErr('${jsA(id)}','${e}',this)">${e}</button>`).join('')}</div>
       <details class="sol-detail"><summary class="dim">📖 詳解 · 老師這樣教</summary>
         <p>${rtTxt(q.sol)}</p>${q.solFig ? `<div class="qfig">${sanitizeSVG(q.solFig)}</div>` : ''}${q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : ''}${teachBlock(q.id)}
@@ -4549,8 +4559,8 @@ function wfShow() {
       <div class="wc-q" style="text-align:left">${q.stem ? `<div class="bk-stem">${rtTxt(q.stem)}</div>` : ''}${rtTxt(q.q)}${q.fig ? `<div class="qfig">${sanitizeSVG(q.fig)}</div>` : ''}${q.type !== 'fill' && q.opts ? `<div class="bk-opts">${q.opts.map((o, i) => `<div class="bk-opt"><span class="bk-op">(${i + 1})</span><span>${rtTxt(o)}</span></div>`).join('')}</div>` : ''}</div>
       <div id="wf-back" style="display:none;text-align:left">
         <p>正解：<b class="accent big">${q.type === 'fill' ? mDispOpt(String(q.ans[0])) : q.ans.map((a) => `(${a + 1}) ${q.opts ? rtTxt(q.opts[a]) : ''}`).join('、')}</b></p>
-        ${w.adv && w.adv.fe ? `<p class="badc">上次你這裡跑掉了：${escH(w.adv.fe)}</p>` : ''}
-        ${w.adv && w.adv.nt ? `<div class="next-step"><b>🎯 下次這樣做：</b>${escH(w.adv.nt)}</div>` : ''}
+        ${w.adv && w.adv.fe ? `<p class="badc">上次你這裡跑掉了：${rtAi(w.adv.fe)}</p>` : ''}
+        ${w.adv && w.adv.nt ? `<div class="next-step"><b>🎯 下次這樣做：</b>${rtAi(w.adv.nt)}</div>` : ''}
         ${q.tip ? `<p class="tip">💡 ${rtTxt(q.tip)}</p>` : ''}
       </div>
     </div>
@@ -4736,7 +4746,7 @@ function renderStats() {
     procCard = `<div class="card"><h2>🧠 你最常卡的地方 <span class="dim">${hasAI ? 'AI 從手寫過程判讀' : '依停頓位置判讀（設 AI key 後升級成語意版）'}</span></h2>
       ${phBars}
       <p style="margin-top:8px"><b>最近的卡點（含解法）：</b></p>
-      <ul>${stuckList.map((s) => `<li>${s.topic ? TOPICS[s.topic] + '：' : ''}${escH(s.what || '')}${s.fix ? `　<span class="okc">💡 ${escH(s.fix)}</span>` : ''} <span class="dim">（${s.d}${s.dur ? '，停 ' + s.dur + 's' : ''}）</span></li>`).join('')}</ul>
+      <ul>${stuckList.map((s) => `<li>${s.topic ? TOPICS[s.topic] + '：' : ''}${rtAi(s.what || '')}${s.fix ? `　<span class="okc">💡 ${rtAi(s.fix)}</span>` : ''} <span class="dim">（${s.d}${s.dur ? '，停 ' + s.dur + 's' : ''}）</span></li>`).join('')}</ul>
       ${numLine}</div>`;
   } else if (procAtt.length) {
     const fiAvg = Math.round(procAtt.reduce((s, a) => s + (a.p.fi || 0), 0) / procAtt.length);
