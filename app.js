@@ -2,7 +2,7 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0716f'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0716g'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
 const KEY = 'mathA13';
@@ -5341,6 +5341,7 @@ function renderPlan() {
    在封鎖外部連線的環境（claude.ai artifact）自動降級為純本機模式。 */
 const SUPA_URL = 'https://rrihysbxhsbxjteqmtdu.supabase.co';
 const SUPA_KEY = 'sb_publishable_p6ThWGf5DLp6XRCovZMVDQ_9vJG_Y41';
+const AUTH_REDIRECT_URL = 'https://uqrqmmw.github.io/matha/';
 let supa = null;
 let syncState = { user: null, msg: '', last: null };
 let syncTimer = null;
@@ -5578,7 +5579,7 @@ async function syncLogin(isSignup) {
   if (!email || pass.length < 6) { syncState.msg = '帳號或密碼格式不對（密碼至少 6 碼）'; renderStats(); return; }
   syncState.msg = '處理中…'; renderStats();
   const { data, error } = isSignup
-    ? await supa.auth.signUp({ email, password: pass })
+    ? await supa.auth.signUp({ email, password: pass, options: { emailRedirectTo: AUTH_REDIRECT_URL } })
     : await supa.auth.signInWithPassword({ email, password: pass });
   if (error) syncState.msg = (isSignup ? '註冊' : '登入') + '失敗：' + error.message;
   else if (isSignup && !data.session) syncState.msg = '註冊成功——去收信點確認連結後回來登入（或到 Supabase 後台 Auth 設定關掉 Confirm email）';

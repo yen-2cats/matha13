@@ -190,6 +190,27 @@ test('一般登出只登出本機；撤銷配對連結使用 global scope', asyn
   assert.deepEqual(scopes, ['local', 'global']);
 });
 
+test('註冊確認信固定回到 GitHub Pages 的 matha 專案路徑', async () => {
+  const { context, run } = loadApp();
+  context.__fields = {
+    '#sy-email': { value: 'learner@example.com' },
+    '#sy-pass': { value: 'secret123' },
+  };
+  context.__signupPayload = null;
+  context.__auth = {
+    signUp: async (payload) => {
+      context.__signupPayload = payload;
+      return { data: { session: null }, error: null };
+    },
+  };
+  context.document.querySelector = (selector) => context.__fields[selector] || null;
+  run('renderStats = () => {}; supa = { auth: __auth }');
+
+  await run('syncLogin(true)');
+
+  assert.equal(context.__signupPayload.options.emailRedirectTo, 'https://uqrqmmw.github.io/matha/');
+});
+
 test('公式卡 id 唯一，模擬卷固定 12 題且不重複', () => {
   const { run } = loadApp();
   const flashIds = plain(run('FLASH.map((card) => card.id)'));
