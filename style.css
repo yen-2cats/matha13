@@ -833,6 +833,20 @@ select:focus, textarea:focus, input:focus { outline: 2px solid rgba(117, 103, 92
 .paper-source-card p { margin: 0 0 7px; color: var(--accent-deep); font-weight: 600; }
 .paper-source-card small { display: block; color: var(--dim); line-height: 1.5; }
 .paper-source-card .btn { width: 100%; }
+.paper-source-card.is-practice { background: #f4f2ed; border-style: dashed; }
+.paper-source-card .paper-practice-note,
+.paper-source-card .paper-calibration-note { margin: 8px 0; padding: 8px 10px; border-radius: 7px; font-size: 13px; line-height: 1.45; }
+.paper-source-card .paper-practice-note { color: #695f52; background: #ebe6dc; border: 1px solid #ddd4c6; }
+.paper-source-card .paper-calibration-note { color: #4e6256; background: #e8eee8; border: 1px solid #d2ded4; }
+.paper-learning-summary { margin-top: 18px; }
+.paper-level-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin: 14px 0 20px; }
+.paper-level-summary span { padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; background: #f7f5f0; color: var(--dim); }
+.paper-level-summary b { display: block; margin-top: 3px; color: var(--text); font-size: 22px; }
+.paper-analysis-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin-bottom: 20px; }
+.paper-analysis-grid > div { min-width: 0; }
+.paper-learning-summary .report-row { grid-template-columns: minmax(150px, 1fr) auto auto auto; }
+.paper-card-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.paper-card-actions .btn { flex: 1 1 150px; margin: 0; }
 .paper-scan-stack { display: grid; gap: 18px; width: min(100%, 1180px); margin: 14px auto 110px; }
 .paper-scan { margin: 0; overflow: hidden; background: #e5e1da; border: 1px solid #c9c2b8; border-radius: 3px; box-shadow: var(--sh-1); }
 .paper-scan img { display: block; width: 100%; height: auto; background: #fff; }
@@ -895,6 +909,15 @@ select:focus, textarea:focus, input:focus { outline: 2px solid rgba(117, 103, 92
 .paper-finish-bar { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 8px 14px; background: rgba(251, 250, 247, .98); border-top: 1px solid var(--border); box-shadow: 0 -2px 12px rgba(52, 47, 42, .08); }
 .paper-finish-bar span { color: var(--dim); font-size: 13px; }
 .paper-finish-bar .btn { min-height: 44px; margin: 0; }
+.paper-result-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.paper-result-actions .btn { white-space: nowrap; }
+.paper-grade-audit { width: min(760px, calc(100vw - 48px)); }
+.paper-audit-scroll { max-height: min(58vh, 620px); overflow: auto; margin: 16px 0; border: 1px solid var(--border); }
+.paper-grade-audit table { width: 100%; border-collapse: collapse; }
+.paper-grade-audit th, .paper-grade-audit td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+.paper-grade-audit thead th { position: sticky; top: 0; z-index: 1; background: #f4f1eb; }
+.paper-grade-audit select, .paper-grade-audit input { min-height: 42px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: var(--r-s); background: #fff; color: var(--text); font: inherit; }
+.paper-grade-audit input { width: 72px; }
 .paper-grade-loading { width: min(680px, calc(100% - 32px)); margin: max(30px, 12vh) auto; padding: clamp(24px, 5vw, 52px); text-align: center; }
 .paper-grade-loading h1 { margin-bottom: 12px; }
 .paper-grade-loading small { display: block; margin-top: 22px; color: var(--dim); }
@@ -926,6 +949,7 @@ select:focus, textarea:focus, input:focus { outline: 2px solid rgba(117, 103, 92
   .paper-review-layout { grid-template-columns: 1fr; }
   .paper-review-source { max-height: 52vh; }
   .paper-review-work { position: static; }
+  .paper-result-actions { max-width: min(100%, 620px); flex-wrap: wrap; }
 }
 
 @media (max-width: 620px) {
@@ -1509,6 +1533,9 @@ select:focus, textarea:focus, input:focus { outline: 2px solid rgba(117, 103, 92
 }
 
 @media (max-width: 700px) {
+  .paper-level-summary, .paper-analysis-grid { grid-template-columns: 1fr; }
+  .paper-learning-summary .report-row { grid-template-columns: 1fr auto; }
+  .paper-learning-summary .report-row span { grid-column: 1 / -1; }
   .paper-session-shell .paper-ink-tools {
     grid-template-columns: repeat(4, minmax(44px, 1fr)) minmax(126px, 1.25fr);
   }

@@ -2,10 +2,20 @@
    設計原則：每一題都帶碼表、每一個錯都分類、用數據決定練什麼。 */
 'use strict';
 
-const APP_VER = '0718h'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
+const APP_VER = '0718i'; // 版本戳：顯示在做題畫面右上，用來確認裝置載到的是不是最新版
 
 /* ═══════════ 狀態 ═══════════ */
-const KEY = 'mathA13';
+const LEGACY_KEY = 'mathA13';
+const LEGACY_OWNER_KEY = 'mathA13_legacy_owner_v1';
+const ACTIVE_USER_KEY = 'mathA13_active_user_v1';
+const ANONYMOUS_KEY = 'mathA13_anonymous_v1';
+function userStateKey(userId) {
+  return `${LEGACY_KEY}:user:${String(userId || '').replace(/[^\w-]/g, '_')}`;
+}
+function storedActiveUserId() {
+  try { return localStorage.getItem(ACTIVE_USER_KEY) || ''; } catch (_) { return ''; }
+}
+let KEY = storedActiveUserId() ? userStateKey(storedActiveUserId()) : LEGACY_KEY;
 let S = load();
 function stripLegacyAiSecrets(state) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) return state;
@@ -14,13 +24,16 @@ function stripLegacyAiSecrets(state) {
   delete clean.aikeyTs;
   return clean;
 }
-function load() {
-  const def = {
+function freshState() {
+  return {
     attempts: [], wrong: {}, drills: {}, mocks: [], corrections: [], daily: {},
     outlineAttempts: [], visionQueue: [], visionHistory: [], conceptAttempts: [], paperRuns: [], ver: 3,
   };
+}
+function load(key = KEY) {
+  const def = freshState();
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(key);
     if (raw) {
       const p = JSON.parse(raw);
       if (p && typeof p === 'object' && !Array.isArray(p)) return stripLegacyAiSecrets({ ...def, ...p }); // 舊版曾把供應商 key 混進狀態；載入時立即剔除
@@ -198,8 +211,14 @@ async function idbWriteAll(packs) {
 async function stateRead() {
   const db = await idbOpen();
   return new Promise((res, rej) => {
-    const rq = db.transaction('state').objectStore('state').get('current');
-    rq.onsuccess = () => res(rq.result || null);
+    const store = db.transaction('state').objectStore('state');
+    const rq = store.get(`current:${KEY}`);
+    rq.onsuccess = () => {
+      if (rq.result || KEY !== LEGACY_KEY) { res(rq.result || null); return; }
+      const legacy = store.get('current');
+      legacy.onsuccess = () => res(legacy.result || null);
+      legacy.onerror = () => rej(legacy.error);
+    };
     rq.onerror = () => rej(rq.error);
   });
 }
@@ -208,11 +227,59 @@ async function stateWrite(state) {
   const snapshot = { updatedAt: Number(state && state._mt) || Date.now(), state: stripLegacyAiSecrets(state) };
   return new Promise((res, rej) => {
     const tx = db.transaction('state', 'readwrite');
-    tx.objectStore('state').put(snapshot, 'current');
+    tx.objectStore('state').put(snapshot, `current:${KEY}`);
     tx.oncomplete = () => res();
     tx.onerror = () => rej(tx.error);
     tx.onabort = () => rej(tx.error || new Error('本機狀態寫入中止'));
   });
+}
+function legacyOwnerId() {
+  try { return localStorage.getItem(LEGACY_OWNER_KEY) || ''; } catch (_) { return ''; }
+}
+function inkRecordVisibleToCurrentUser(row) {
+  if (!row) return false;
+  const uid = syncState && syncState.user && syncState.user.id;
+  if (uid) return row.user_id === uid || (!row.user_id && legacyOwnerId() === uid);
+  return !row.user_id && !legacyOwnerId();
+}
+async function activateUserState(user) {
+  const uid = user && user.id;
+  if (!uid) return false;
+  const previousKey = KEY;
+  const targetKey = userStateKey(uid);
+  if (previousKey !== targetKey) {
+    try { localStorage.setItem(previousKey, JSON.stringify(S)); } catch (_) {}
+    await stateWrite(S).catch(() => {});
+  }
+  let owner = legacyOwnerId();
+  if (!owner) {
+    owner = uid;
+    try { localStorage.setItem(LEGACY_OWNER_KEY, uid); } catch (_) {}
+  }
+  let scoped = null;
+  try { scoped = localStorage.getItem(targetKey); } catch (_) {}
+  if (!scoped && owner === uid) {
+    const legacy = load(LEGACY_KEY);
+    try { localStorage.setItem(targetKey, JSON.stringify(legacy)); } catch (_) {}
+  }
+  KEY = targetKey;
+  try { localStorage.setItem(ACTIVE_USER_KEY, uid); } catch (_) {}
+  S = load(KEY);
+  await stateInit();
+  await refreshInkLocalStatus();
+  applyExtBank();
+  return true;
+}
+async function deactivateUserState() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(S));
+    localStorage.removeItem(ACTIVE_USER_KEY);
+  } catch (_) {}
+  await stateWrite(S).catch(() => {});
+  KEY = ANONYMOUS_KEY;
+  S = freshState();
+  await refreshInkLocalStatus();
+  applyExtBank();
 }
 /* localStorage 只保留同步啟動用的鏡像；真正的本機權威副本在 IndexedDB。
    兩邊都存在時仍做聯集，並讓修改時間較新的副本決定非紀錄欄位。 */
@@ -259,12 +326,12 @@ async function inkRecordAll() {
   });
 }
 async function inkRecordPending() {
-  try { return (await inkRecordAll()).filter((row) => row && !row.uploaded && row.strokes); }
+  try { return (await inkRecordAll()).filter((row) => inkRecordVisibleToCurrentUser(row) && !row.uploaded && row.strokes); }
   catch (_) { return []; }
 }
 async function inkRecordStats() {
   try {
-    const all = await inkRecordAll();
+    const all = (await inkRecordAll()).filter(inkRecordVisibleToCurrentUser);
     return { total: all.length, pending: all.filter((x) => !x.uploaded).length };
   } catch (_) { return { total: 0, pending: 0 }; }
 }
@@ -2191,6 +2258,7 @@ const PAPER_SOURCES = [
       { file: 'mock-1-page-5-6.png', label: '題本第 6 頁', side: 'right' },
     ] },
   { id: 'paper-mock-2', title: '第二次模考', questions: 19, minutes: 100, pages: 6,
+    calibrationEligible: false, practiceReason: '原始題本只有 19 題，不符合正式學測 20 題結構',
     key: [
       { type: 'single', ans: [1], points: 5 }, { type: 'single', ans: [0], points: 5 },
       { type: 'single', ans: [2], points: 5 }, { type: 'single', ans: [1], points: 5 },
@@ -2238,6 +2306,21 @@ const PAPER_SOURCES = [
       { file: 'mock-3-page-3-4.png', label: '題本第 4 頁', side: 'right' },
     ] },
 ];
+const PAPER_ERROR_KINDS = [
+  '看不出第一個切入點',
+  '單元／工具判斷錯誤',
+  '條件翻譯不完整',
+  '定義或公式不熟',
+  '建式方向錯誤',
+  '推理中間有缺口',
+  '計算或符號失誤',
+  '圖形／空間想像卡住',
+  '答案表達或收尾錯誤',
+];
+function paperErrorKindOptions(selected) {
+  return `<option value="">選一個最接近的卡點</option>${PAPER_ERROR_KINDS.map((kind) =>
+    `<option value="${escH(kind)}"${selected === kind ? ' selected' : ''}>${escH(kind)}</option>`).join('')}`;
+}
 
 /* 定義卡只存數學概念本身，不要求逐字背誦。reference 是 AI 判斷語意是否完整的準繩，
    prompt 則刻意要求「自己的話＋例子／反例」，避免只背課本句子。 */
@@ -2427,7 +2510,9 @@ function wilsonBounds(ok, n, z) {
 }
 /* 級分只由完整系統模擬校準。弱項刷題是刻意抽難點，不能拿它直接預測級分。 */
 function mockCalibration() {
-  const external = (S.extMocks || []).filter((m) => m && m.total > 0 && Number.isFinite(Number(m.score)))
+  const external = (S.extMocks || []).filter((m) =>
+    m && m.total > 0 && Number.isFinite(Number(m.score)) &&
+    m.calibrationEligible !== false && (!m.questions || Number(m.questions) === 20))
     .slice().sort((a, b) => String(a.d || '').localeCompare(String(b.d || '')) || Number(a.ts || 0) - Number(b.ts || 0)).slice(-3)
     .map((m) => ({ d: m.d, ok: Number(m.score), n: Number(m.total), acc: Number(m.score) / Number(m.total), name: m.name }));
   const system = (S.mocks || []).filter((m) => m && m.n > 0 && Number.isFinite(Number(m.acc))).slice(-3);
@@ -3357,6 +3442,11 @@ window.addEventListener('pagehide', () => {
     paperSourceSession.run.mt = Date.now();
     save();
   }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'hidden' || sessionMode !== 'paper-source' || !paperSourceSession) return;
+  paperInkCommitCurrent();
+  paperInkPersist(true);
 });
 try { history.pushState({ guard: 1 }, ''); } catch (e) {}
 window.addEventListener('popstate', () => {
@@ -5166,7 +5256,15 @@ function paperSourceCardHTML(source) {
     status = `${latest.score}/100｜原卷訂正已完成`;
     button = '再寫一回';
   }
-  return `<section class="paper-source-card"><div><span class="eyebrow">私有原卷｜${source.questions} 題・${source.minutes} 分鐘</span><h3>${escH(source.title)}</h3><p>${escH(status)}</p><small>直接在高解析題本上作答；交卷後 GPT‑5.5 讀取整份筆跡，以紅筆圈記並批分。</small></div><button class="btn${active ? ' primary' : ''}" onclick="startPaperSource('${jsA(source.id)}')">${button}</button></section>`;
+  const actions = active
+    ? `<button class="btn primary" onclick="startPaperSource('${jsA(source.id)}')">${button}</button>`
+    : latest && latest.aiGrade
+      ? `<div class="paper-card-actions"><button class="btn primary" onclick="openPaperGradeResult('${jsA(latest.id)}')">查看紅筆批改卷</button><button class="btn" onclick="startPaperSource('${jsA(source.id)}')">${button}</button></div>`
+      : `<button class="btn" onclick="startPaperSource('${jsA(source.id)}')">${button}</button>`;
+  const calibration = source.calibrationEligible === false
+    ? `<p class="paper-practice-note"><b>練習卷，不列入級分校準。</b>${escH(source.practiceReason || '')}</p>`
+    : '<p class="paper-calibration-note">完整 20 題，可列入級分校準。</p>';
+  return `<section class="paper-source-card${source.calibrationEligible === false ? ' is-practice' : ''}"><div><span class="eyebrow">私有原卷｜${source.questions} 題・${source.minutes} 分鐘</span><h3>${escH(source.title)}</h3><p>${escH(status)}</p>${calibration}<small>直接在高解析題本上作答；交卷後 GPT‑5.5 讀取整份筆跡，以紅筆圈記並批分。</small></div>${actions}</section>`;
 }
 function renderMockIntro() {
   const n = S.mocks.length;
@@ -5455,6 +5553,7 @@ async function startPaperSource(sourceId) {
       inkMode: 'pen',
       inkWidth: paperInkWidthValue(run.paperInkWidth),
       inkColor,
+      inkClientIds: Object.fromEntries(source.scans.map((_, page) => [page, paperInkClientFor(run, page)])),
     };
     paperSourceSession.page = Math.max(0, Math.min(source.scans.length - 1, paperSourceSession.page));
     sessionActive = true; sessionMode = run.status === 'grading' ? 'paper-grade' : 'paper-source';
@@ -5475,6 +5574,11 @@ let paperStateSaveTimer = null;
 let paperZoomPaintTimer = null;
 const PAPER_ZOOM_MIN = .75;
 const PAPER_ZOOM_MAX = 4;
+/* A 400% zoom must not create gigabyte-sized backing stores on a high-DPR tablet.
+   The CSS sheet still zooms normally; only each transparent canvas layer is capped. */
+const PAPER_CANVAS_MAX_PIXELS = 12000000;
+const PAPER_INK_GRID_SIZE = 40;
+const PAPER_INK_DEVICE_KEY = 'mathA13_paper_device_v1';
 const PAPER_INK_WIDTH_MIN = .35;
 const PAPER_INK_WIDTH_MAX = 2;
 const PAPER_INK_COLORS = {
@@ -5484,31 +5588,92 @@ const PAPER_INK_COLORS = {
 };
 const PAPER_AI_RED = '#b43b32';
 function paperInkQid(run, page) { return `paper:${run.id}:v${PAPER_LAYOUT_VERSION}:${page}`; }
+function paperInkDeviceId() {
+  try {
+    let id = localStorage.getItem(PAPER_INK_DEVICE_KEY);
+    if (id) return id;
+    id = globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    id = String(id).replace(/[^\w.-]/g, '_');
+    localStorage.setItem(PAPER_INK_DEVICE_KEY, id);
+    return id;
+  } catch (_) {
+    return 'device-fallback';
+  }
+}
+function paperInkClientFor(run, page) {
+  return `ink-paper-${String(run.id || 'run').replace(/[^\w.-]/g, '_')}-${Number(page) || 0}-${paperInkDeviceId()}`;
+}
+function paperInkStrokeId(stroke) {
+  if (!stroke) return '';
+  if (stroke.id) return String(stroke.id);
+  const pts = Array.isArray(stroke.pts) ? stroke.pts : [];
+  const first = pts[0] || [], last = pts[pts.length - 1] || [];
+  const coord = (value) => Math.round((Number(value) || 0) * 100000);
+  stroke.id = `legacy-${Number(stroke.t0) || 0}-${pts.length}-${coord(first[0])}-${coord(first[1])}-${coord(last[0])}-${coord(last[1])}-${stroke.c || 'black'}`;
+  return stroke.id;
+}
+function paperInkMergePayloads(payloads) {
+  const strokes = new Map(), deleted = new Set();
+  for (const payload of payloads || []) {
+    for (const id of payload && Array.isArray(payload.deleted) ? payload.deleted : []) if (id) deleted.add(String(id));
+    for (const stroke of payload && Array.isArray(payload.s) ? payload.s : []) {
+      if (!stroke) continue;
+      const id = paperInkStrokeId(stroke);
+      if (stroke.dead) deleted.add(id);
+      const old = strokes.get(id);
+      if (!old || Number(stroke.t1 || stroke.t0 || 0) >= Number(old.t1 || old.t0 || 0)) strokes.set(id, stroke);
+    }
+  }
+  for (const id of deleted) strokes.delete(id);
+  return {
+    s: [...strokes.values()].sort((a, b) => Number(a.t0 || 0) - Number(b.t0 || 0)),
+    deleted: [...deleted],
+  };
+}
+function paperInkRowUpdatedAt(row) {
+  return Date.parse(row && (row.updated_at || row.created_at) || '')
+    || Number(row && (row.updatedAt || row.t0) || 0);
+}
 async function paperInkLoadAll(run, source) {
   const pages = {};
   let local = [];
-  try { local = await inkRecordAll(); } catch (_) {}
+  try { local = (await inkRecordAll()).filter(inkRecordVisibleToCurrentUser); } catch (_) {}
   let cloud = [];
   if (supa && syncState.user) {
     try {
-      const { data, error } = await supa.from('ink_sessions')
-        .select('client_id,qid,t0,proc,strokes,created_at')
+      let { data, error } = await supa.from('ink_sessions')
+        .select('client_id,qid,t0,proc,strokes,created_at,updated_at')
         .like('qid', `paper:${run.id}:%`);
+      if (error && /updated_at/i.test(String(error.message || ''))) {
+        ({ data, error } = await supa.from('ink_sessions')
+          .select('client_id,qid,t0,proc,strokes,created_at')
+          .like('qid', `paper:${run.id}:%`));
+      }
       if (!error && Array.isArray(data)) cloud = data;
     } catch (_) {}
   }
   for (let page = 0; page < source.scans.length; page++) {
     const qid = paperInkQid(run, page);
-    const clientId = run.paperInkClients && run.paperInkClients[page];
-    const localRows = local.filter((row) => row && row.qid === qid && (!clientId || row.client_id === clientId))
+    const localRows = local.filter((row) => row && row.qid === qid)
       .sort((a, b) => Number(b.updatedAt || b.t0 || 0) - Number(a.updatedAt || a.t0 || 0));
-    const cloudRows = cloud.filter((row) => row && row.qid === qid && (!clientId || row.client_id === clientId))
-      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-    const row = localRows[0] || cloudRows[0] || null;
-    const strokes = row && row.strokes && Array.isArray(row.strokes.s) ? row.strokes.s : [];
-    pages[page] = { s: strokes, loaded: true };
-    if (row && row.client_id && run.paperInkClients[page] !== row.client_id) run.paperInkClients[page] = row.client_id;
-    if (!localRows.length && row && row.client_id) {
+    const cloudRows = cloud.filter((row) => row && row.qid === qid)
+      .sort((a, b) => paperInkRowUpdatedAt(b) - paperInkRowUpdatedAt(a));
+    const byClient = new Map();
+    for (const row of [...cloudRows, ...localRows]) {
+      if (!row || !row.client_id) continue;
+      const old = byClient.get(row.client_id);
+      if (!old || paperInkRowUpdatedAt(row) >= paperInkRowUpdatedAt(old)) byClient.set(row.client_id, row);
+    }
+    const rows = [...byClient.values()];
+    const merged = paperInkMergePayloads(rows.map((row) => row.strokes));
+    pages[page] = {
+      s: merged.s,
+      deleted: new Set(merged.deleted),
+      loaded: true, revision: 0, persistedRevision: 0, dirty: false,
+    };
+    const localClients = new Set(localRows.map((row) => row.client_id));
+    for (const row of cloudRows) if (row && row.client_id && !localClients.has(row.client_id)) {
       inkRecordPut({ ...row, user_id: syncState.user ? syncState.user.id : null, uploaded: true }).catch(() => {});
     }
   }
@@ -5518,41 +5683,136 @@ function paperInkPage(page) {
   if (!paperSourceSession) return null;
   paperSourceSession.inkPages = paperSourceSession.inkPages || {};
   const index = page == null ? (Number(paperSourceSession.page) || 0) : page;
-  return (paperSourceSession.inkPages[index] = paperSourceSession.inkPages[index] || { s: [], loaded: true });
+  return (paperSourceSession.inkPages[index] = paperSourceSession.inkPages[index]
+    || { s: [], deleted:new Set(), loaded: true, revision: 0, persistedRevision: 0, dirty: false });
+}
+function paperInkCloneStroke(stroke) {
+  return {
+    id: paperInkStrokeId(stroke),
+    t0: Number(stroke.t0) || Date.now(),
+    t1: Number(stroke.t1) || null,
+    w: paperInkWidthValue(stroke.w),
+    c: PAPER_INK_COLORS[stroke.c] ? stroke.c : 'black',
+    pts: (stroke.pts || []).map((point) => [
+      Number(point[0]) || 0,
+      Number(point[1]) || 0,
+      Number(point[2]) || .5,
+    ]),
+  };
+}
+function paperInkCompact(data) {
+  if (!data || !Array.isArray(data.s)) return [];
+  data.deleted = data.deleted instanceof Set ? data.deleted : new Set(data.deleted || []);
+  for (const stroke of data.s) if (stroke && stroke.dead) data.deleted.add(paperInkStrokeId(stroke));
+  const live = data.s.filter((stroke) => stroke && !stroke.dead && Array.isArray(stroke.pts) && stroke.pts.length > 1);
+  if (live.length !== data.s.length) {
+    data.s = live;
+    data.spatial = null;
+  }
+  return live;
+}
+function paperInkSnapshot(data, pageIndex) {
+  const strokes = paperInkCompact(data).map(paperInkCloneStroke);
+  const current = paperSourceSession && Number(paperSourceSession.page) === Number(pageIndex)
+    ? paperSourceSession.inkCurrent : null;
+  if (current && Array.isArray(current.pts) && current.pts.length > 1) strokes.push(paperInkCloneStroke(current));
+  return strokes;
+}
+function paperInkScheduleRetry(pageIndex, data) {
+  if (Number(data.persistFailures) >= 3 || paperInkSaveTimer || !paperSourceSession || paperSourceSession.inkPages[pageIndex] !== data) return;
+  paperInkSaveTimer = setTimeout(() => {
+    paperInkSaveTimer = null;
+    paperInkPersistPage(pageIndex, data, false);
+  }, 1200);
+}
+async function paperInkPersistPage(pageIndex, data, force) {
+  if (!paperSourceSession || !data) return false;
+  const run = paperSourceSession.run;
+  if (data.persistPromise) {
+    try { await data.persistPromise; } catch (_) {}
+  }
+  let wrote = false;
+  do {
+    if (!data.dirty && !force) return wrote;
+    const revision = Number(data.revision) || 0;
+    const record = {
+      client_id: paperSourceSession.inkClientIds[pageIndex],
+      user_id: syncState.user ? syncState.user.id : null,
+      qid: paperInkQid(run, pageIndex),
+      t0: Number(run.createdAt) + pageIndex,
+      proc: { overlay: true, mode: 'paper-source', page: pageIndex, revision },
+      strokes: {
+        paper: true, revision,
+        s: paperInkSnapshot(data, pageIndex),
+        deleted: [...(data.deleted instanceof Set ? data.deleted : new Set(data.deleted || []))],
+      },
+      uploaded: false,
+    };
+    const request = inkRecordPut(record);
+    data.persistPromise = request;
+    try {
+      await request;
+      wrote = true;
+      data.persistedRevision = Math.max(Number(data.persistedRevision) || 0, revision);
+      data.dirty = Number(data.revision) > revision;
+      data.persistFailures = 0;
+      statePersistErr = false;
+      clearTimeout(paperInkCloudTimer);
+      paperInkCloudTimer = setTimeout(() => { if (syncState.user) flushInkQueue(); }, 1400);
+      const status = $('#paper-ink-status');
+      if (status) status.textContent = paperInkGestureIsTemporaryErase() ? 'S Pen 側鍵按住：暫時橡皮擦' : '已保存';
+    } catch (_) {
+      data.dirty = true;
+      data.persistFailures = (Number(data.persistFailures) || 0) + 1;
+      statePersistErr = true;
+      const status = $('#paper-ink-status');
+      if (status) status.textContent = '保存失敗，正在自動重試；請先不要關閉頁面';
+      paperInkScheduleRetry(pageIndex, data);
+      return false;
+    } finally {
+      if (data.persistPromise === request) data.persistPromise = null;
+    }
+    force = force && data.dirty;
+  } while (force);
+  return wrote;
 }
 function paperInkPersist(force) {
   if (!paperSourceSession) return Promise.resolve(false);
   const { run, page } = paperSourceSession;
   const data = paperInkPage(page);
-  if (!data || !data.dirty && !force) return Promise.resolve(false);
+  if (!data) return Promise.resolve(false);
   const pageIndex = Number(page) || 0;
-  run.paperInkClients = run.paperInkClients || {};
-  if (!run.paperInkClients[pageIndex]) run.paperInkClients[pageIndex] = inkClientId(`paper-${run.id}-${pageIndex}`, run.createdAt);
-  clearTimeout(paperInkSaveTimer);
-  const persist = async () => {
-    data.dirty = false;
-    await inkRecordPut({
-      client_id: run.paperInkClients[pageIndex], user_id: syncState.user ? syncState.user.id : null,
-      qid: paperInkQid(run, pageIndex), t0: Number(run.createdAt) + pageIndex,
-      proc: { overlay: true, mode: 'paper-source', page: pageIndex }, strokes: { paper: true, s: data.s }, uploaded: false,
-    });
-    clearTimeout(paperInkCloudTimer);
-    paperInkCloudTimer = setTimeout(() => { if (syncState.user) flushInkQueue(); }, 1400);
-    const status = $('#paper-ink-status');
-    if (status) status.textContent = paperInkGestureIsTemporaryErase() ? 'S Pen 側鍵按住：暫時橡皮擦' : '已保存';
-    return true;
-  };
-  if (force) return persist().catch(() => { statePersistErr = true; return false; });
-  paperInkSaveTimer = setTimeout(() => persist().catch(() => {
-    statePersistErr = true;
-    const status = $('#paper-ink-status'); if (status) status.textContent = '保存失敗，請先不要關閉頁面';
-  }), 450);
-  const status = $('#paper-ink-status'); if (status) status.textContent = paperInkGestureIsTemporaryErase() ? 'S Pen 側鍵按住：暫時橡皮擦' : '保存中';
+  paperSourceSession.inkClientIds = paperSourceSession.inkClientIds || {};
+  if (!paperSourceSession.inkClientIds[pageIndex]) paperSourceSession.inkClientIds[pageIndex] = paperInkClientFor(run, pageIndex);
+  if (!data.dirty && !force) return Promise.resolve(false);
+  if (force) {
+    clearTimeout(paperInkSaveTimer);
+    paperInkSaveTimer = null;
+    return paperInkPersistPage(pageIndex, data, true);
+  }
+  if (!paperInkSaveTimer) {
+    paperInkSaveTimer = setTimeout(() => {
+      paperInkSaveTimer = null;
+      paperInkPersistPage(pageIndex, data, false);
+    }, 450);
+  }
+  const status = $('#paper-ink-status');
+  if (status) status.textContent = paperInkGestureIsTemporaryErase() ? 'S Pen 側鍵按住：暫時橡皮擦' : '保存中';
   return Promise.resolve(true);
 }
 function paperInkMarkDirty() {
   const page = paperInkPage(); if (!page) return;
-  page.dirty = true; paperInkPersist(false);
+  page.revision = (Number(page.revision) || 0) + 1;
+  page.dirty = true;
+  paperInkPersist(false);
+}
+function paperInkCheckpointCurrent(now) {
+  if (!paperSourceSession || !paperSourceSession.inkCurrent || paperSourceSession.inkCurrent.pts.length < 2) return false;
+  const at = Number(now) || Date.now();
+  if (at - Number(paperSourceSession.inkCheckpointAt || 0) < 900) return false;
+  paperSourceSession.inkCheckpointAt = at;
+  paperInkMarkDirty();
+  return true;
 }
 function paperInkLine(ctx, stroke, width, height) {
   if (!stroke || stroke.dead || !Array.isArray(stroke.pts) || stroke.pts.length < 2) return;
@@ -5564,14 +5824,49 @@ function paperInkLine(ctx, stroke, width, height) {
   for (let i = 1; i < stroke.pts.length; i++) ctx.lineTo(stroke.pts[i][0] * width, stroke.pts[i][1] * height);
   ctx.stroke();
 }
+function paperCanvasBackingScale(width, height) {
+  const dpr = Math.max(.5, Number(window.devicePixelRatio) || 1);
+  const limited = Math.sqrt(PAPER_CANVAS_MAX_PIXELS / Math.max(1, width * height));
+  return Math.max(.35, Math.min(dpr, limited));
+}
+function paperCanvasPrepare(cv, forcedScale) {
+  const width = Number(cv.clientWidth) || Number(cv.width) || 1;
+  const height = Number(cv.clientHeight) || Number(cv.height) || 1;
+  const scale = Number(forcedScale) > 0 ? Number(forcedScale) : paperCanvasBackingScale(width, height);
+  const pixelWidth = Math.max(1, Math.round(width * scale));
+  const pixelHeight = Math.max(1, Math.round(height * scale));
+  const resized = cv.width !== pixelWidth || cv.height !== pixelHeight;
+  if (resized) { cv.width = pixelWidth; cv.height = pixelHeight; }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  return { ctx, width, height, scale, resized };
+}
+function paperInkStrokeRange(ctx, stroke, width, height, fromIndex) {
+  if (!stroke || stroke.dead || !Array.isArray(stroke.pts) || stroke.pts.length < 2) return;
+  const start = Math.max(1, Number(fromIndex) || 1);
+  if (start >= stroke.pts.length) return;
+  const range = stroke.pts.slice(Math.max(0, start - 1));
+  const pressure = Number(range.reduce((sum, p) => sum + (Number(p[2]) || .5), 0) / Math.max(1, range.length));
+  ctx.strokeStyle = PAPER_INK_COLORS[stroke.c] || PAPER_INK_COLORS.black;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.lineWidth = (1.35 + Math.max(.15, pressure) * 1.5) * paperInkWidthValue(stroke.w);
+  ctx.beginPath();
+  ctx.moveTo(stroke.pts[start - 1][0] * width, stroke.pts[start - 1][1] * height);
+  for (let i = start; i < stroke.pts.length; i++) ctx.lineTo(stroke.pts[i][0] * width, stroke.pts[i][1] * height);
+  ctx.stroke();
+}
+function paperInkPaintCurrent(fromIndex) {
+  const cv = $('#paper-ink-canvas'), stroke = paperSourceSession && paperSourceSession.inkCurrent;
+  if (!cv || !stroke || !cv.clientWidth || !cv.clientHeight) return;
+  const prepared = paperCanvasPrepare(cv);
+  if (prepared.resized) { paperInkPaint(); return; }
+  paperInkStrokeRange(prepared.ctx, stroke, prepared.width, prepared.height, fromIndex);
+}
 function paperInkPaint() {
   const cv = $('#paper-ink-canvas'), data = paperInkPage();
   if (!cv || !data || !cv.clientWidth || !cv.clientHeight) return;
-  const dpr = window.devicePixelRatio || 1, width = cv.clientWidth, height = cv.clientHeight;
-  if (cv.width !== Math.round(width * dpr) || cv.height !== Math.round(height * dpr)) {
-    cv.width = Math.max(1, Math.round(width * dpr)); cv.height = Math.max(1, Math.round(height * dpr));
-  }
-  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, width, height);
+  const { ctx, width, height } = paperCanvasPrepare(cv);
+  ctx.clearRect(0, 0, width, height);
   for (const stroke of data.s) paperInkLine(ctx, stroke, width, height);
   if (paperSourceSession.inkCurrent) paperInkLine(ctx, paperSourceSession.inkCurrent, width, height);
   paperAiPaint();
@@ -5582,15 +5877,9 @@ function paperAiPageQuestions(page) {
     ? result.questions.filter((item) => Number(item && item.page) === Number(page) + 1)
     : [];
 }
-function paperAiPaintCanvas(cv, questions, includeAnswer) {
-  if (!cv || !cv.clientWidth || !cv.clientHeight) return;
-  const dpr = window.devicePixelRatio || 1, width = cv.clientWidth, height = cv.clientHeight;
-  if (cv.width !== Math.round(width * dpr) || cv.height !== Math.round(height * dpr)) {
-    cv.width = Math.max(1, Math.round(width * dpr));
-    cv.height = Math.max(1, Math.round(height * dpr));
-  }
-  const ctx = cv.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+function paperAiPaintCanvas(cv, questions, includeAnswer, forcedScale) {
+  if (!cv || !(Number(cv.clientWidth) || Number(cv.width)) || !(Number(cv.clientHeight) || Number(cv.height))) return;
+  const { ctx, width, height } = paperCanvasPrepare(cv, forcedScale);
   ctx.clearRect(0, 0, width, height);
   ctx.strokeStyle = PAPER_AI_RED;
   ctx.fillStyle = PAPER_AI_RED;
@@ -5708,12 +5997,90 @@ function paperInkPoint(e, cv) {
     Math.max(0, Math.min(1, (e.clientY - rect.top) / Math.max(1, rect.height))),
     Number.isFinite(Number(e.pressure)) && Number(e.pressure) > 0 ? Number(e.pressure) : .5];
 }
+function paperInkStrokeBounds(stroke) {
+  if (!stroke || !Array.isArray(stroke.pts) || !stroke.pts.length) return null;
+  if (stroke._paperBounds) return stroke._paperBounds;
+  let left = 1, top = 1, right = 0, bottom = 0;
+  for (const point of stroke.pts) {
+    const x = Math.max(0, Math.min(1, Number(point[0]) || 0));
+    const y = Math.max(0, Math.min(1, Number(point[1]) || 0));
+    left = Math.min(left, x); top = Math.min(top, y);
+    right = Math.max(right, x); bottom = Math.max(bottom, y);
+  }
+  return (stroke._paperBounds = [left, top, right, bottom]);
+}
+function paperInkGridRange(bounds) {
+  const clamp = (value) => Math.max(0, Math.min(PAPER_INK_GRID_SIZE - 1, Math.floor(value * PAPER_INK_GRID_SIZE)));
+  return [clamp(bounds[0]), clamp(bounds[1]), clamp(bounds[2]), clamp(bounds[3])];
+}
+function paperInkSpatialAdd(data, stroke, index) {
+  const bounds = paperInkStrokeBounds(stroke);
+  if (!data || !data.spatial || !bounds || stroke.dead) return;
+  const [x0, y0, x1, y1] = paperInkGridRange(bounds);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const key = y * PAPER_INK_GRID_SIZE + x;
+    let bucket = data.spatial.get(key);
+    if (!bucket) data.spatial.set(key, (bucket = []));
+    bucket.push(index);
+  }
+}
+function paperInkSpatialBuild(data) {
+  if (!data) return new Map();
+  if (data.spatial) return data.spatial;
+  data.spatial = new Map();
+  for (let i = 0; i < data.s.length; i++) paperInkSpatialAdd(data, data.s[i], i);
+  return data.spatial;
+}
+function paperInkSpatialCandidates(data, bounds) {
+  const spatial = paperInkSpatialBuild(data);
+  const [x0, y0, x1, y1] = paperInkGridRange(bounds);
+  const found = new Set();
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    for (const index of spatial.get(y * PAPER_INK_GRID_SIZE + x) || []) found.add(index);
+  }
+  return [...found].sort((a, b) => b - a);
+}
+function paperInkRedrawRegion(cv, data, bounds) {
+  if (!cv || !data || !bounds) return;
+  const prepared = paperCanvasPrepare(cv);
+  if (prepared.resized) { paperInkPaint(); return; }
+  const { ctx, width, height } = prepared;
+  const pad = 12;
+  const left = Math.max(0, bounds[0] * width - pad), top = Math.max(0, bounds[1] * height - pad);
+  const right = Math.min(width, bounds[2] * width + pad), bottom = Math.min(height, bounds[3] * height + pad);
+  ctx.clearRect(left, top, Math.max(1, right - left), Math.max(1, bottom - top));
+  const clipped = typeof ctx.save === 'function' && typeof ctx.clip === 'function' && typeof ctx.rect === 'function';
+  if (clipped) {
+    ctx.save(); ctx.beginPath(); ctx.rect(left, top, right - left, bottom - top); ctx.clip();
+  }
+  const expanded = [
+    Math.max(0, left / width), Math.max(0, top / height),
+    Math.min(1, right / width), Math.min(1, bottom / height),
+  ];
+  const candidates = paperInkSpatialCandidates(data, expanded).sort((a, b) => a - b);
+  for (const index of candidates) {
+    const stroke = data.s[index];
+    if (stroke && !stroke.dead) paperInkLine(ctx, stroke, width, height);
+  }
+  const current = paperSourceSession && paperSourceSession.inkCurrent;
+  if (current) {
+    const currentBounds = paperInkStrokeBounds(current);
+    if (currentBounds && !(currentBounds[2] < expanded[0] || currentBounds[0] > expanded[2]
+      || currentBounds[3] < expanded[1] || currentBounds[1] > expanded[3])) paperInkLine(ctx, current, width, height);
+  }
+  if (clipped) ctx.restore();
+}
 function paperInkEraseAt(e, cv) {
   const data = paperInkPage(); if (!data) return false;
   const p = paperInkPoint(e, cv), width = cv.clientWidth, height = cv.clientHeight;
   const px = p[0] * width, py = p[1] * height;
   let hit = null, best = 18;
-  for (let i = data.s.length - 1; i >= 0; i--) {
+  const radiusX = 22 / Math.max(1, width), radiusY = 22 / Math.max(1, height);
+  const candidates = paperInkSpatialCandidates(data, [
+    Math.max(0, p[0] - radiusX), Math.max(0, p[1] - radiusY),
+    Math.min(1, p[0] + radiusX), Math.min(1, p[1] + radiusY),
+  ]);
+  for (const i of candidates) {
     const stroke = data.s[i]; if (!stroke || stroke.dead) continue;
     const pts = stroke.pts || [];
     for (let j = 0; j < pts.length; j++) {
@@ -5727,7 +6094,13 @@ function paperInkEraseAt(e, cv) {
     }
   }
   if (!hit) return false;
-  hit.dead = Date.now(); paperInkMarkDirty(); paperInkPaint(); return true;
+  const bounds = paperInkStrokeBounds(hit);
+  data.deleted = data.deleted instanceof Set ? data.deleted : new Set(data.deleted || []);
+  data.deleted.add(paperInkStrokeId(hit));
+  hit.dead = Date.now();
+  paperInkMarkDirty();
+  paperInkRedrawRegion(cv, data, bounds);
+  return true;
 }
 function paperPinchMeasure(a, b) {
   return {
@@ -5811,11 +6184,13 @@ function paperInkDown(e) {
     return;
   }
   paperSourceSession.inkCurrent = {
+    id: inkClientId('paper-stroke', Date.now()),
     t0: Date.now(),
     w: paperInkWidthValue(paperSourceSession.inkWidth),
     c: PAPER_INK_COLORS[paperSourceSession.inkColor] ? paperSourceSession.inkColor : 'black',
     pts: [paperInkPoint(e, cv)],
   };
+  paperSourceSession.inkCheckpointAt = Date.now();
 }
 function paperInkMove(e) {
   if (!paperSourceSession) return;
@@ -5860,6 +6235,7 @@ function paperInkMove(e) {
     paperInkModeRender(nextMode, paperInkGestureIsTemporaryErase());
     if (nextMode === 'pen') {
       paperSourceSession.inkCurrent = {
+        id: inkClientId('paper-stroke', Date.now()),
         t0: Date.now(),
         w: paperInkWidthValue(paperSourceSession.inkWidth),
         c: PAPER_INK_COLORS[paperSourceSession.inkColor] ? paperSourceSession.inkColor : 'black',
@@ -5872,13 +6248,18 @@ function paperInkMove(e) {
     return;
   }
   const stroke = paperSourceSession.inkCurrent; if (!stroke) return;
+  const fromIndex = stroke.pts.length;
   let events = [e];
   try { const coalesced = e.getCoalescedEvents && e.getCoalescedEvents(); if (coalesced && coalesced.length) events = coalesced; } catch (_) {}
   for (const ev of events) {
     const p = paperInkPoint(ev, cv), last = stroke.pts[stroke.pts.length - 1];
     if (Math.hypot((p[0] - last[0]) * cv.clientWidth, (p[1] - last[1]) * cv.clientHeight) >= .8) stroke.pts.push(p);
   }
-  paperInkPaint();
+  if (stroke.pts.length > fromIndex) {
+    delete stroke._paperBounds;
+    paperInkPaintCurrent(fromIndex);
+    paperInkCheckpointCurrent(Date.now());
+  }
 }
 function paperInkUp(e) {
   if (!paperSourceSession) return;
@@ -5907,10 +6288,17 @@ function paperInkUp(e) {
   }
   if (e.pointerType === 'pen') paperSourceSession.sPenLastAt = Date.now();
   if (paperSourceSession.inkPointer !== e.pointerId) return;
+  const current = paperSourceSession.inkCurrent;
+  if (paperSourceSession.inkGestureMode === 'pen' && current && paperInkPenHasContact(e)) {
+    const cv = e.currentTarget, fromIndex = current.pts.length;
+    const p = paperInkPoint(e, cv), last = current.pts[current.pts.length - 1];
+    if (Math.hypot((p[0] - last[0]) * cv.clientWidth, (p[1] - last[1]) * cv.clientHeight) >= .8) {
+      current.pts.push(p); delete current._paperBounds; paperInkPaintCurrent(fromIndex);
+    }
+  }
   paperInkCommitCurrent();
   paperSourceSession.inkPointer = null; paperSourceSession.inkGestureMode = null;
   paperInkModeRender(paperSourceSession.sPenButtonHeld ? 'erase' : (paperSourceSession.inkMode || 'pen'), !!paperSourceSession.sPenButtonHeld);
-  paperInkPaint();
 }
 function paperInkAttach() {
   const cv = $('#paper-ink-canvas'); if (!cv) return;
@@ -5946,8 +6334,9 @@ function paperInkSamsungHover(e) {
 function paperInkContextMenu(e) {
   e.preventDefault();
   if (!paperSourceSession) return false;
+  paperInkCommitCurrent();
   paperSourceSession.sPenButtonHeld = false;
-  paperSourceSession.inkPointer = null; paperSourceSession.inkCurrent = null; paperSourceSession.inkGestureMode = null;
+  paperSourceSession.inkPointer = null; paperSourceSession.inkGestureMode = null;
   paperInkModeRender(paperSourceSession.inkMode || 'pen');
   return false;
 }
@@ -5967,7 +6356,12 @@ function paperInkCommitCurrent() {
   const stroke = paperSourceSession.inkCurrent;
   paperSourceSession.inkCurrent = null;
   if (!stroke || stroke.pts.length <= 1) return false;
-  stroke.t1 = Date.now(); paperInkPage().s.push(stroke); paperInkMarkDirty(); return true;
+  stroke.t1 = Date.now();
+  const data = paperInkPage(), index = data.s.length;
+  data.s.push(stroke);
+  if (data.spatial) paperInkSpatialAdd(data, stroke, index);
+  paperInkMarkDirty();
+  return true;
 }
 function paperInkModeRender(mode, temporaryErase = false) {
   for (const key of ['pen', 'erase']) {
@@ -6017,17 +6411,29 @@ function paperInkColorSet(color) {
 function paperInkUndo() {
   const data = paperInkPage(); if (!data) return;
   const stroke = [...data.s].reverse().find((item) => item && !item.dead); if (!stroke) return;
-  stroke.dead = Date.now(); paperInkMarkDirty(); paperInkPaint();
+  const bounds = paperInkStrokeBounds(stroke);
+  data.deleted = data.deleted instanceof Set ? data.deleted : new Set(data.deleted || []);
+  data.deleted.add(paperInkStrokeId(stroke));
+  stroke.dead = Date.now(); paperInkMarkDirty();
+  paperInkRedrawRegion($('#paper-ink-canvas'), data, bounds);
 }
 function paperInkClear() {
   const data = paperInkPage(); if (!data || !data.s.some((item) => item && !item.dead)) return;
   if (!confirm('清空這一頁題本上的全部筆跡？其他頁不受影響。')) return;
-  const now = Date.now(); for (const stroke of data.s) if (stroke && !stroke.dead) stroke.dead = now;
+  const now = Date.now();
+  data.deleted = data.deleted instanceof Set ? data.deleted : new Set(data.deleted || []);
+  for (const stroke of data.s) if (stroke && !stroke.dead) {
+    data.deleted.add(paperInkStrokeId(stroke));
+    stroke.dead = now;
+  }
   paperInkMarkDirty(); paperInkPaint();
 }
 function paperWorkspacePage(delta) {
   if (!paperSourceSession) return;
-  if (!paperSourceSession.readOnly) paperInkPersist(true);
+  if (!paperSourceSession.readOnly) {
+    paperInkCommitCurrent();
+    paperInkPersist(true);
+  }
   const nextPage = Math.max(0, Math.min(paperSourceSession.source.scans.length - 1, paperSourceSession.page + delta));
   if (nextPage === paperSourceSession.page) return false;
   paperSourceSession.page = nextPage;
@@ -6098,7 +6504,7 @@ function paperImageLoad(url) {
     image.src = url;
   });
 }
-async function paperCompositeImage(source, urls, inkPages, page) {
+async function paperCompositeImage(source, urls, inkPages, page, includeGrade) {
   const scan = source.scans[page];
   const image = await paperImageLoad(urls[page]);
   const width = 1536, height = Math.round(width * 2535 / 2112);
@@ -6120,6 +6526,12 @@ async function paperCompositeImage(source, urls, inkPages, page) {
   }
   const data = inkPages && inkPages[page];
   for (const stroke of data && Array.isArray(data.s) ? data.s : []) paperInkLine(ctx, stroke, width, height);
+  if (includeGrade) {
+    const red = document.createElement('canvas');
+    red.width = width; red.height = height;
+    paperAiPaintCanvas(red, paperAiPageQuestions(page), true, 1);
+    ctx.drawImage(red, 0, 0);
+  }
   return canvas.toDataURL('image/jpeg', .9).split(',')[1];
 }
 async function paperPageComposite(page) {
@@ -6130,6 +6542,67 @@ async function paperPageComposite(page) {
     paperSourceSession.inkPages,
     page,
   );
+}
+async function paperExportGradedPdf() {
+  if (!paperSourceSession || !paperSourceSession.run || !paperSourceSession.run.aiGrade) {
+    alert('目前沒有可輸出的批改結果。');
+    return false;
+  }
+  const session = paperSourceSession;
+  const { source, run, urls, inkPages } = session;
+  const printWindow = window.open('', '_blank');
+  if (!printWindow) {
+    alert('瀏覽器封鎖了列印頁。請允許這個網站開啟新分頁後再按一次。');
+    return false;
+  }
+  printWindow.document.write('<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><title>正在產生批改卷</title></head><body style="font-family:system-ui,sans-serif;padding:32px;color:#51483f">正在整理完整批改卷，請稍候，不要關閉此分頁。</body></html>');
+  printWindow.document.close();
+  const button = $('#paper-export-pdf');
+  if (button) { button.disabled = true; button.textContent = '正在整理 PDF…'; }
+  try {
+    const images = [];
+    for (let page = 0; page < source.scans.length; page++) {
+      if (button) button.textContent = `正在整理 ${page + 1}/${source.scans.length}`;
+      images.push(`data:image/jpeg;base64,${await paperCompositeImage(source, urls, inkPages, page, true)}`);
+    }
+    const title = `${source.title}_${run.d || today()}_${run.aiGrade.score}分_紅筆批改`;
+    const wrong = run.aiGrade.wrongNos && run.aiGrade.wrongNos.length ? run.aiGrade.wrongNos.join('、') : '無';
+    const pages = images.map((src, index) => `<section class="page">
+      ${index === 0 ? `<header><strong>${escH(source.title)}　${Number(run.aiGrade.score) || 0} / 100</strong><span>錯題：${escH(wrong)}　作答日：${escH(run.d || today())}</span></header>` : ''}
+      <img src="${src}" alt="${escH(source.title)}第 ${index + 1} 頁批改卷">
+      <footer>${index + 1} / ${images.length}</footer>
+    </section>`).join('');
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><title>${escH(title)}</title>
+      <style>
+        @page { size: A4 portrait; margin: 5mm; }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; background: #fff; color: #413b35; font-family: system-ui, "Noto Sans TC", sans-serif; }
+        .page { width: 100%; min-height: 287mm; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; align-items: start; break-after: page; page-break-after: always; }
+        .page:last-child { break-after: auto; page-break-after: auto; }
+        header { min-height: 12mm; display: flex; align-items: center; justify-content: space-between; gap: 8mm; padding: 1mm 2mm 2mm; font-size: 10pt; }
+        header strong { font-size: 13pt; }
+        img { display: block; width: 100%; height: auto; max-height: 266mm; object-fit: contain; object-position: top center; }
+        footer { min-height: 5mm; padding-top: 1mm; text-align: right; color: #82786d; font-size: 8pt; }
+        @media screen { body { max-width: 210mm; margin: 0 auto; background: #d8d3cb; } .page { margin: 10mm 0; padding: 5mm; background: #fff; box-shadow: 0 3px 18px rgba(0,0,0,.14); } }
+      </style></head><body>${pages}</body></html>`);
+    printWindow.document.close();
+    printWindow.document.title = title;
+    const ready = () => {
+      try { printWindow.focus(); printWindow.print(); } catch (_) {}
+    };
+    if (printWindow.document.readyState === 'complete') setTimeout(ready, 250);
+    else printWindow.addEventListener('load', () => setTimeout(ready, 250), { once: true });
+    return true;
+  } catch (error) {
+    try {
+      printWindow.document.body.innerHTML = `<h1>批改卷整理失敗</h1><p>${escH((error && error.message) || error)}</p>`;
+    } catch (_) {}
+    alert(`批改卷整理失敗：${(error && error.message) || error}`);
+    return false;
+  } finally {
+    if (button) { button.disabled = false; button.innerHTML = `${uiIcon('save')}輸出批改卷 PDF`; }
+  }
 }
 function paperGradePromptKey(source) {
   return source.key.map((q, index) => ({
@@ -6153,8 +6626,8 @@ async function paperAiGradeCall(source, pages) {
 1. questions 必須恰好回傳第 1 到 ${source.questions} 題，每題一次；page 必須依上面對照。
 2. 只把考生自己寫的黑／藍／綠筆跡視為作答。印刷題目不是作答，右側留白也可能有最後答案。
 3. 特別防止誤判：圈住「印刷的題號」只代表考生想回頭看，絕對不是選了同號選項。若只圈題號並寫「不會」、沒有另外寫最終答案，必須回傳 hasFinalAnswer=false、status=unanswered、selectedOptions=[]；例如圈住印刷題號 4 不等於單選答案 (4)。
-4. hasFinalAnswer 只表示你是否真的找到考生另外寫出的最終答案。單選與填答答對得該題滿分，答錯或未答 0 分；等價分數、根式、小數形式可算對。
-5. 多選題的 selectedOptions 必須逐一列出你從考生「最終答案清單」辨識到的 1 起算選項，不可從算式中猜。依五個選項逐一比較：全對 5 分、差 1 個選項 3 分、差 2 個選項 1 分、差 3 個以上 0 分；系統仍會用正式答案重新計分。
+4. hasFinalAnswer 只表示你是否真的找到考生另外寫出的最終答案。finalAnswer 必須逐字填入你辨識到的最終答案；沒有答案填空字串。單選與填答答對得該題滿分，答錯或未答 0 分；等價分數、根式、小數形式可算對。
+5. 單選與多選的 selectedOptions 都必須列出你從考生「最終答案清單」辨識到的 1 起算選項，不可從算式中猜；填答題固定回傳空陣列。多選依五個選項逐一比較：全對 5 分、差 1 個選項 3 分、差 2 個選項 1 分、差 3 個以上 0 分；系統會以 selectedOptions 與正式答案重新計分，不採信模型自行填的 status 或 points。
 6. status：正確 correct、錯誤 incorrect、沒有作答 unanswered、筆跡真的無法辨識 uncertain。不要為了湊答案而猜。
 7. marks 的 box 是該張完整單頁 [左,上,右,下] 0–1 座標，必須落在考生實際寫下的最終答案或答案清單上，不可框題目、題號或中間算式。單選／填答各回傳一個 kind=check 或 cross；未答用 unanswered、看不清楚用 uncertain，option=0。
 8. 複選題必須像真人逐項批改：每個正確選到的手寫選項回傳 kind=check；每個錯選的手寫選項回傳 kind=strike；每個漏選的正確選項回傳 kind=add，box 放在答案清單旁可補寫的位置。這三種 mark 的 option 都填該選項 1–5。若部分得分，可另回傳一個 option=0 的 partial，但不可省略逐項 marks。
@@ -6198,10 +6671,38 @@ function paperNormalizeAiGrade(source, raw, model) {
     const selectedOptions = selectedOptionsProvided
       ? [...new Set(item.selectedOptions.map(Number).filter((option) => Number.isInteger(option) && option >= 1 && option <= 5))].sort((a, b) => a - b)
       : [];
-    const correctOptions = q.type === 'multi' ? q.ans.map((option) => option + 1).sort((a, b) => a - b) : [];
+    const finalAnswerProvided = typeof item.finalAnswer === 'string';
+    const finalAnswer = finalAnswerProvided ? item.finalAnswer.trim() : '';
+    const correctOptions = q.type === 'single' || q.type === 'multi'
+      ? q.ans.map((option) => option + 1).sort((a, b) => a - b) : [];
     const explicitlyUnanswered = item.hasFinalAnswer === false || status === 'unanswered';
     let points = Number(item.points);
     if (status === 'uncertain') points = 0;
+    else if (q.type === 'single' && selectedOptionsProvided) {
+      if (explicitlyUnanswered) {
+        status = 'unanswered';
+        points = 0;
+      } else if (selectedOptions.length !== 1) {
+        status = selectedOptions.length ? 'incorrect' : 'uncertain';
+        points = 0;
+      } else {
+        const correct = selectedOptions[0] === correctOptions[0];
+        status = correct ? 'correct' : 'incorrect';
+        points = correct ? q.points : 0;
+      }
+    } else if (q.type === 'fill' && finalAnswerProvided) {
+      if (explicitlyUnanswered) {
+        status = 'unanswered';
+        points = 0;
+      } else if (!finalAnswer) {
+        status = 'uncertain';
+        points = 0;
+      } else {
+        const correct = checkFill(finalAnswer, q.ans);
+        status = correct ? 'correct' : 'incorrect';
+        points = correct ? q.points : 0;
+      }
+    }
     else if (q.type === 'multi' && selectedOptionsProvided) {
       if (explicitlyUnanswered || !selectedOptions.length) {
         status = 'unanswered';
@@ -6268,7 +6769,8 @@ function paperNormalizeAiGrade(source, raw, model) {
       answer: paperFinalAnswerText(q),
       read: String(item.read || '').slice(0, 120),
       hasFinalAnswer: status !== 'unanswered' && item.hasFinalAnswer !== false,
-      selectedOptions: q.type === 'multi' ? selectedOptions : [],
+      finalAnswer,
+      selectedOptions: q.type === 'single' || q.type === 'multi' ? selectedOptions : [],
       marks,
     };
   });
@@ -6304,10 +6806,12 @@ function renderPaperSource() {
   });
 }
 function paperSourcePause() {
-  if (!paperSourceSession) return;
+  if (!paperSourceSession) return Promise.resolve(false);
   const run = paperSourceSession.run;
-  paperInkPersist(true);
+  paperInkCommitCurrent();
+  const persisted = paperInkPersist(true);
   run.remainingMs = paperRunLeft(run); run.resumeAt = null; run.status = 'paused'; run.mt = Date.now(); save();
+  return persisted;
 }
 function paperSourceDiscard(runId) {
   const run = (S.paperRuns || []).find((item) => item && item.id === runId);
@@ -6322,25 +6826,85 @@ function paperSourceDiscard(runId) {
   S.extMocks = (S.extMocks || []).filter((row) => row && row.paperRunId !== runId);
   save();
 }
+function paperGradeSnapshot(grade, reason) {
+  return {
+    id: `grade-audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    at: Date.now(),
+    reason: String(reason || 'snapshot').slice(0, 80),
+    model: String(grade && grade.model || ''),
+    gradedAt: Number(grade && grade.gradedAt) || null,
+    score: Number(grade && grade.score) || 0,
+    questions: (grade && Array.isArray(grade.questions) ? grade.questions : []).map((item) => ({
+      no: Number(item.no), status: String(item.status || 'uncertain'), points: Number(item.points) || 0,
+      read: String(item.read || ''), finalAnswer: String(item.finalAnswer || ''),
+      selectedOptions: Array.isArray(item.selectedOptions) ? item.selectedOptions.slice() : [],
+    })),
+  };
+}
+function paperGradeAuditPush(run, reason) {
+  if (!run || !run.aiGrade) return;
+  run.gradeAudit = Array.isArray(run.gradeAudit) ? run.gradeAudit : [];
+  run.gradeAudit.push(paperGradeSnapshot(run.aiGrade, reason));
+  if (run.gradeAudit.length > 20) run.gradeAudit.splice(0, run.gradeAudit.length - 20);
+}
+function paperGradeRecalculate(grade) {
+  grade.score = Math.round(grade.questions.reduce((sum, item) => sum + (Number(item.points) || 0), 0) * 100) / 100;
+  grade.wrongNos = grade.questions.filter((item) => item.status !== 'correct').map((item) => item.no);
+  grade.uncertainNos = grade.questions.filter((item) => item.status === 'uncertain').map((item) => item.no);
+  return grade;
+}
+function paperSourceUpdateExtMock(source, run) {
+  S.extMocks = S.extMocks || [];
+  const grade = run.aiGrade;
+  if (!grade) return;
+  const tags = paperRunLearningTags(run);
+  const record = {
+    id: `external-${run.id}`, paperRunId: run.id, sourceId: source.id, d: run.d || today(), ts: run.submittedAt,
+    name: source.title, score: grade.score, total: 100, questions: source.questions,
+    calibrationEligible: source.questions === 20 && source.calibrationEligible !== false,
+    minutesLeft: Math.max(0, Math.round(run.remainingMs / 60000)),
+    topics: tags.topics, errors: tags.errors,
+    err: tags.errors[0] || String(run.err || ''),
+    note: `${grade.wrongNos.length ? `錯題 ${grade.wrongNos.join('、')}` : '全對'}${run.note ? `｜${run.note}` : ''}`,
+    mt: run.mt,
+  };
+  const existing = S.extMocks.findIndex((item) => item && item.paperRunId === run.id);
+  if (existing >= 0) S.extMocks[existing] = { ...S.extMocks[existing], ...record };
+  else S.extMocks.push(record);
+}
+function paperRunLearningTags(run) {
+  const topics = new Set(Array.isArray(run && run.topics) ? run.topics : []);
+  const errors = new Set(Array.isArray(run && run.errors) ? run.errors : []);
+  for (const state of Object.values(run && run.review || {})) {
+    if (!state || typeof state !== 'object') continue;
+    if (state.topic) topics.add(state.topic);
+    if (state.errorKind) errors.add(state.errorKind);
+    if (state.aiErrorKind) errors.add(state.aiErrorKind);
+    for (const log of state.logs || []) {
+      if (log && log.topic) topics.add(log.topic);
+      if (log && log.errorKind) errors.add(log.errorKind);
+    }
+  }
+  return { topics: [...topics].filter((key) => TOPICS[key]), errors: [...errors].filter(Boolean) };
+}
+function paperRunRefreshLearningTags(run) {
+  const tags = paperRunLearningTags(run);
+  run.topics = tags.topics;
+  run.errors = tags.errors;
+  return tags;
+}
 function paperSourceRecordGrade(source, run, grade) {
+  if (run.aiGrade) paperGradeAuditPush(run, 'AI 重新批改前');
   run.aiGrade = grade;
   run.score = grade.score;
   run.wrongNos = grade.wrongNos;
   run.note = grade.uncertainNos.length ? `AI 看不清楚：${grade.uncertainNos.join('、')}` : '';
   run.gradeDraft = null;
   run.status = 'awaiting-correction';
-  run.submittedAt = Date.now();
-  run.due = addDays(today(), 1);
+  run.submittedAt = run.submittedAt || Date.now();
+  run.due = run.due || addDays(run.d || today(), 1);
   run.mt = Date.now();
-  S.extMocks = S.extMocks || [];
-  const record = {
-    id: `external-${run.id}`, paperRunId: run.id, sourceId: source.id, d: run.d || today(), ts: run.submittedAt,
-    name: source.title, score: grade.score, total: 100, minutesLeft: Math.max(0, Math.round(run.remainingMs / 60000)),
-    topics: [], err: '', note: `${grade.wrongNos.length ? `錯題 ${grade.wrongNos.join('、')}` : '全對'}${run.note ? `｜${run.note}` : ''}`,
-  };
-  const existing = S.extMocks.findIndex((item) => item && item.paperRunId === run.id);
-  if (existing >= 0) S.extMocks[existing] = { ...S.extMocks[existing], ...record };
-  else S.extMocks.push(record);
+  paperSourceUpdateExtMock(source, run);
   save();
 }
 function paperSourceGradeLoading(source, reason, progress, error) {
@@ -6354,7 +6918,14 @@ async function paperSourceGrade(reason) {
   stopTicker();
   const session = paperSourceSession, { source, run } = session;
   session.grading = true;
-  await paperInkPersist(true);
+  paperInkCommitCurrent();
+  const saved = await paperInkPersist(true);
+  if (!saved && paperInkPage() && paperInkPage().dirty) {
+    session.grading = false;
+    renderPaperSource();
+    alert('最後一筆尚未安全保存，已取消交卷。請保持頁面開啟，等右上顯示「已保存」後再交卷。');
+    return;
+  }
   run.remainingMs = paperRunLeft(run); run.resumeAt = null; run.status = 'grading'; run.gradeReason = reason; run.mt = Date.now(); save();
   sessionMode = 'paper-grade';
   paperSourceGradeLoading(source, reason, `正在整理第 1 / ${source.scans.length} 頁…`);
@@ -6398,10 +6969,95 @@ function renderPaperGradeResult() {
     <div class="paper-workbar"><div class="paper-work-title"><b>第一次批改｜對錯、分數、正確答案</b><small>${escH(source.title)}</small></div><strong class="paper-result-score">${grade.score} / 100</strong>
       <div class="paper-workgroup right"><button class="paper-icon-btn" onclick="paperWorkspaceZoom(-.25)" aria-label="縮小題本">−</button><span id="paper-zoom-label" class="paper-zoom-label">${Math.round(paperSourceSession.zoom * 100)}%</span><button class="paper-icon-btn" onclick="paperWorkspaceZoom(.25)" aria-label="放大題本">＋</button><span class="paper-page-label"><b>${page + 1} / ${source.scans.length}</b><small>${escH(scan.label)}</small></span><button class="paper-icon-btn" onclick="paperWorkspacePage(-1)" ${page <= 0 ? 'disabled' : ''} aria-label="上一頁">${uiIcon('arrow-left')}</button><button class="paper-icon-btn" onclick="paperWorkspacePage(1)" ${page >= source.scans.length - 1 ? 'disabled' : ''} aria-label="下一頁">${uiIcon('arrow-right')}</button><button class="paper-icon-btn" onclick="paperSourceCloseResult()" aria-label="關閉批改結果">${uiIcon('x')}</button></div></div>
     <div class="paper-workspace" aria-label="你的原筆跡＋AI 紅筆標記"><section class="paper-source-pane"><div class="paper-page-viewport"><div class="paper-spread"><div id="paper-write-sheet" class="paper-write-sheet" data-side="${scan.side}"><div class="paper-question-crop"><img id="paper-source-image" src="${urls[page]}" alt="${escH(source.title)} ${escH(scan.label)}"></div><div class="paper-note-margin" aria-hidden="true"></div><canvas id="paper-ink-canvas" aria-label="可左右滑動查看 AI 紅筆批改的題本頁"></canvas><canvas id="paper-ai-canvas" aria-label="AI 紅筆批改標記"></canvas></div></div></div></section></div>
-    <div class="paper-finish-bar paper-result-bar"><span>錯題：${grade.wrongNos.length ? grade.wrongNos.join('、') : '無'}${uncertain.length ? `｜看不清楚：${uncertain.join('、')}` : ''}｜第二次詳批最早 ${run.due}</span><button class="btn primary" onclick="paperSourceCloseResult()">完成，回模考入口</button></div>
+    <div class="paper-finish-bar paper-result-bar"><span>錯題：${grade.wrongNos.length ? grade.wrongNos.join('、') : '無'}${uncertain.length ? `｜看不清楚：${uncertain.join('、')}` : ''}｜第二次詳批最早 ${run.due}</span><div class="paper-result-actions"><button class="btn" onclick="paperGradeAuditOpen()">核對／修正分數</button><button class="btn" onclick="paperSourceRegrade()">重新 AI 簡批</button><button id="paper-export-pdf" class="btn" onclick="paperExportGradedPdf()">${uiIcon('save')}輸出 PDF</button><button class="btn primary" onclick="paperSourceCloseResult()">完成</button></div></div>
     <button id="paper-ui-toggle" class="paper-ui-toggle" onclick="paperUiToggle()" aria-label="收起工具" aria-pressed="false">${uiIcon('pencil')}<span>收起</span></button></div>`;
   sessionChrome(true);
   paperInkAttach();
+}
+async function openPaperGradeResult(runId) {
+  const run = (S.paperRuns || []).find((item) => item && item.id === runId);
+  const source = run && paperSourceById(run.sourceId);
+  if (!run || !source || !run.aiGrade) { alert('找不到這一回的完整批改結果。'); return false; }
+  if (!supa || !syncState.user) { alert('請先登入，才能載入私有原卷與完整筆跡。'); return false; }
+  paperSourceRelease();
+  app().innerHTML = `<div class="card"><h1>正在載入 ${escH(source.title)}批改卷</h1><p class="dim">正在合併私有原掃描、考試筆跡與 AI 紅筆。</p></div>`;
+  try {
+    const urls = await paperSourceFiles(source);
+    run.paperInkClients = run.paperInkClients || {};
+    const inkPages = await paperInkLoadAll(run, source);
+    paperSourceSession = {
+      source, run, urls, inkPages, page:0, zoom:1, inkMode:'pen',
+      inkWidth:paperInkWidthValue(run.paperInkWidth), inkColor:'black', readOnly:true,
+      inkClientIds:Object.fromEntries(source.scans.map((_, page) => [page, paperInkClientFor(run, page)])),
+    };
+    sessionMode = 'paper-result';
+    sessionActive = false;
+    renderPaperGradeResult();
+    return true;
+  } catch (error) {
+    paperSourceRelease();
+    alert(`批改卷載入失敗：${(error && error.message) || error}`);
+    nav('mock');
+    return false;
+  }
+}
+function paperGradeAuditOpen() {
+  if (!paperSourceSession || !paperSourceSession.run || !paperSourceSession.run.aiGrade) return;
+  const { source, run } = paperSourceSession;
+  const rows = run.aiGrade.questions.map((item) => {
+    const key = source.key[item.no - 1];
+    const options = [
+      ['correct', '正確'], ['incorrect', '錯誤'], ['unanswered', '未答'], ['uncertain', '看不清楚'],
+    ].map(([value, label]) => `<option value="${value}"${item.status === value ? ' selected' : ''}>${label}</option>`).join('');
+    return `<tr data-no="${item.no}"><th>${item.no}</th><td>${escH(paperFinalAnswerText(key))}</td><td><select class="paper-audit-status" aria-label="第 ${item.no} 題狀態">${options}</select></td><td><input class="paper-audit-points" type="number" min="0" max="${Number(key.points) || 0}" step="1" value="${Number(item.points) || 0}" aria-label="第 ${item.no} 題得分"> / ${Number(key.points) || 0}</td></tr>`;
+  }).join('');
+  const history = Array.isArray(run.gradeAudit) ? run.gradeAudit.length : 0;
+  modal(`<div class="paper-grade-audit"><span class="eyebrow">人工覆核</span><h2>逐題核對分數</h2><p>只在確認 AI 看錯答案或配分時修改。每次修改前的版本都會保留，不會覆蓋歷史。</p><div class="paper-audit-scroll"><table><thead><tr><th>題</th><th>正解</th><th>判定</th><th>得分</th></tr></thead><tbody>${rows}</tbody></table></div><p class="dim">目前已有 ${history} 份歷史批改快照。</p><button class="btn primary" onclick="paperGradeAuditSave()">保存人工覆核</button></div>`, [['取消']]);
+}
+function paperGradeAuditSave() {
+  if (!paperSourceSession || !paperSourceSession.run || !paperSourceSession.run.aiGrade) return;
+  const { source, run } = paperSourceSession;
+  const grade = run.aiGrade;
+  const rows = [...document.querySelectorAll('.paper-grade-audit tbody tr')];
+  if (rows.length !== grade.questions.length) { alert('覆核表不完整，沒有修改任何分數。'); return; }
+  paperGradeAuditPush(run, '人工覆核前');
+  for (const row of rows) {
+    const no = Number(row.dataset.no), item = grade.questions.find((question) => question.no === no);
+    const key = source.key[no - 1];
+    if (!item || !key) continue;
+    const status = row.querySelector('.paper-audit-status').value;
+    const points = Math.max(0, Math.min(Number(key.points) || 0, Number(row.querySelector('.paper-audit-points').value) || 0));
+    item.status = ['correct', 'incorrect', 'unanswered', 'uncertain'].includes(status) ? status : 'uncertain';
+    item.points = Math.round(points * 100) / 100;
+    item.manual = true;
+    const kind = item.status === 'correct' ? 'check'
+      : item.status === 'incorrect' && item.points > 0 ? 'partial'
+      : item.status === 'incorrect' ? 'cross'
+      : item.status === 'unanswered' ? 'unanswered' : 'uncertain';
+    const first = Array.isArray(item.marks) && item.marks[0]
+      ? { ...item.marks[0], kind, option:0 }
+      : paperFallbackMark(source, no, paperQuestionScanIndex(source, no) + 1, '', kind, 0, 0);
+    item.marks = [first];
+  }
+  grade.model = String(grade.model || 'gpt-5.5');
+  grade.adjustedAt = Date.now();
+  grade.adjustmentCount = (Number(grade.adjustmentCount) || 0) + 1;
+  paperGradeRecalculate(grade);
+  run.score = grade.score;
+  run.wrongNos = grade.wrongNos.slice();
+  run.note = grade.uncertainNos.length ? `AI／人工仍看不清楚：${grade.uncertainNos.join('、')}` : '';
+  run.mt = Date.now();
+  paperSourceUpdateExtMock(source, run);
+  save();
+  modalClose();
+  renderPaperGradeResult();
+}
+function paperSourceRegrade() {
+  if (!paperSourceSession || !paperSourceSession.run || !paperSourceSession.run.aiGrade) return;
+  modal('<h2>重新進行第一次 AI 簡批？</h2><p>會重新辨識全部頁面，但仍只給對錯、分數與正解，不會開詳解。現在的批改結果會先存入稽核歷史。</p>', [
+    ['取消'],
+    ['重新 AI 簡批', () => paperSourceGrade('重新 AI 簡批'), 'primary'],
+  ]);
 }
 function paperSourceCloseResult() {
   sessionActive = false;
@@ -6808,14 +7464,70 @@ function renderCorrections() {
     return `<div class="card paper-key-wait"><span class="eyebrow">原版紙本卷｜${dueNow ? '已到訂正日' : '尚未到期'}</span><h2>${escH(run.name || '原版模考')}｜${run.d}</h2>
       <p><b>${run.score}/100</b>｜錯題 ${Array.isArray(run.wrongNos) && run.wrongNos.length ? run.wrongNos.join('、') : '無'}。</p>
       <div class="notice"><b>${dueNow ? '今天重新做一次；仍然卡住才開第二次 AI 詳批。' : `第二次 AI 詳批鎖到 ${run.due}。`}</b><p>${dueNow ? '先留下重新計算或破題方向。第一次簡批沒有分析步驟；只有你重試後仍不會，AI 才找第一個錯誤並給完整詳解。' : '第一次批改已標出對錯、分數與正確答案；今天不分析錯誤步驟，也不看詳解。'}</p></div>
-      ${dueNow ? `<div class="actr"><button class="btn primary" onclick="startPaperAnswerReview('${jsA(run.id)}')">開始原卷盲訂正</button></div>` : ''}
+      <div class="actr"><button class="btn" onclick="openPaperGradeResult('${jsA(run.id)}')">查看第一次紅筆卷／輸出 PDF</button><button class="btn" onclick="renderPaperTeacherReport('${jsA(run.id)}')">給老師看逐題紀錄</button>${dueNow ? `<button class="btn primary" onclick="startPaperAnswerReview('${jsA(run.id)}')">開始原卷盲訂正</button>` : ''}</div>
     </div>`;
+  }).join('');
+  const sourceCompleted = (S.paperRuns || []).filter((run) => run && run.status === 'completed' && run.aiGrade)
+    .sort((a, b) => Number(b.submittedAt || 0) - Number(a.submittedAt || 0)).slice(0, 8);
+  const sourceCompletedCards = sourceCompleted.map((run) => {
+    const levels = paperRunLevelCounts(run);
+    return `<div class="report-row"><span>${escH(run.d || '')}｜${escH(run.name || '原版模考')}</span><b>${run.score}/100｜第一級 ${levels.l1}・第二級 ${levels.l2}・第三級 ${levels.l3}</b><button class="btn sm" onclick="renderPaperTeacherReport('${jsA(run.id)}')">老師檢視</button></div>`;
   }).join('');
   app().innerHTML = `<h1>隔日訂正</h1>
     ${dueCards || (!sourceWaitingCards ? '<div class="card"><p>今天沒有到期的盲訂正。</p><div class="actr"><button class="btn primary" onclick="nav(\'mock\')">去做一整回混合訓練</button></div></div>' : '')}
     ${sourceWaitingCards ? `<h2>原版紙本卷</h2>${sourceWaitingCards}` : ''}
     ${waitingCards ? `<h2>尚未到期</h2>${waitingCards}` : ''}
-    ${completedCards ? `<details class="card" open><summary>已完成的模考三級紀錄</summary><div class="report-list">${completedCards}</div></details>` : ''}`;
+    ${completedCards ? `<details class="card" open><summary>已完成的系統模考三級紀錄</summary><div class="report-list">${completedCards}</div></details>` : ''}
+    ${sourceCompletedCards ? `<details class="card" open><summary>已完成的原版模考三級紀錄</summary><div class="report-list">${sourceCompletedCards}</div></details>` : ''}`;
+}
+
+function paperRunLevelCounts(run) {
+  const counts = { l1: 0, l2: 0, l3: 0, open: 0 };
+  const source = paperSourceById(run && run.sourceId);
+  const grade = run && run.aiGrade;
+  if (!source || !grade) return counts;
+  for (let no = 1; no <= source.questions; no++) {
+    const item = grade.questions.find((question) => Number(question.no) === no);
+    const state = run.review && run.review[no];
+    const level = item && item.status === 'correct' ? 1 : Number(state && state.level) || 0;
+    if (level === 1) counts.l1++;
+    else if (level === 2) counts.l2++;
+    else if (level === 3) counts.l3++;
+    else counts.open++;
+  }
+  return counts;
+}
+function renderPaperTeacherReport(runId) {
+  const run = (S.paperRuns || []).find((item) => item && item.id === runId);
+  const source = run && paperSourceById(run.sourceId);
+  const grade = run && run.aiGrade;
+  if (!run || !source || !grade) return renderCorrections();
+  const levels = paperRunLevelCounts(run);
+  const levelName = (level) => level === 1 ? '第一級｜考場會寫'
+    : level === 2 ? '第二級｜只看答案能重算'
+    : level === 3 ? '第三級｜需要詳解'
+    : '尚未完成隔日訂正';
+  const statusName = { correct:'正確', incorrect:'錯誤', unanswered:'未答', uncertain:'待人工確認' };
+  const items = grade.questions.slice().sort((a, b) => Number(a.no) - Number(b.no)).map((item) => {
+    const no = Number(item.no), state = run.review && run.review[no] || {};
+    const level = item.status === 'correct' ? 1 : Number(state.level) || 0;
+    const logs = (state.logs || []).map((log, index) => `<div class="teacher-attempt"><b>第 ${index + 1} 次重想</b>
+      <p>方向：${escH(log.direction || '尚未找到具體方向')}</p>
+      ${log.topic || log.concept ? `<p>單元判斷：${escH(TOPICS[log.topic] || '未選單元')}${log.concept ? `／${escH(log.concept)}` : ''}</p>` : ''}
+      ${log.errorKind ? `<p>自評卡點：${escH(log.errorKind)}</p>` : ''}</div>`).join('');
+    const detail = state.aiDetail;
+    return `<article class="teacher-q level-${level}"><header><span>第 ${no} 題｜${statusName[item.status] || item.status}｜${Number(item.points) || 0}/${Number(source.key[no - 1] && source.key[no - 1].points) || 0} 分</span><b>${levelName(level)}</b></header>
+      <p class="teacher-answer">AI 讀到：${escH(item.read || '（未辨識）')}｜正確答案：${escH(paperFinalAnswerText(source.key[no - 1]))}</p>
+      ${logs || (level === 1 ? '<p class="dim">考場直接答對，不需隔日重想。</p>' : '<p class="dim">尚未留下隔日重想紀錄。</p>')}
+      ${detail ? `<div class="teacher-attempt"><b>第二次 AI 詳批</b>${detail.errorKind ? `<p>AI 錯因：${escH(detail.errorKind)}</p>` : ''}${detail.firstError ? `<p>第一個錯誤：${rtAi(detail.firstError)}</p>` : ''}${detail.nextTime ? `<p>下次訊號：${rtAi(detail.nextTime)}</p>` : ''}</div>` : ''}</article>`;
+  }).join('');
+  const calibration = source.calibrationEligible === false
+    ? '本卷原始結構為 19 題，只作練習與訂正分析，不列入正式級分校準。'
+    : '本卷為完整 20 題，可列入正式級分校準。';
+  app().innerHTML = `<div class="report-head"><div><span class="eyebrow">老師檢視版｜原版模考</span><h1>${escH(source.title)}｜${escH(run.d || '')}</h1><p>${run.score}/100｜第一級 ${levels.l1}｜第二級 ${levels.l2}｜第三級 ${levels.l3}｜尚未完成 ${levels.open}</p><small>${calibration}</small></div>
+    <div class="actr"><button class="btn" onclick="window.print()">列印／存成 PDF</button><button class="btn" onclick="openPaperGradeResult('${jsA(run.id)}')">查看紅筆卷</button><button class="btn primary" onclick="renderCorrections()">回隔日訂正</button></div></div>
+    <div class="teacher-report">${items}</div>`;
+  typesetIn(app()); scrollQuestionTop();
 }
 
 /* 原版紙本卷兩階段批改：
@@ -6887,7 +7599,14 @@ async function paperAiDetailCall(source, no, imageB64, logs) {
     type: 'image',
     source: { type: 'base64', media_type: 'image/jpeg', data: imageB64 },
   }];
-  const payload = await openAiInvoke({ responseType: 'paper_detail', messages: [{ role: 'user', content }] }, 90000);
+  const payload = await openAiInvoke({
+    responseType: 'paper_detail',
+    context: {
+      paperRunId: paperReview && paperReview.run && paperReview.run.id,
+      questionNo: no,
+    },
+    messages: [{ role: 'user', content }],
+  }, 90000);
   if (!payload.json || typeof payload.json !== 'object') throw new Error('OpenAI 沒有回傳完整詳批資料');
   return { json: payload.json, model: String(payload.model || '') };
 }
@@ -6948,14 +7667,14 @@ function renderPaperAnswerReview() {
   }
   if (paperReview.i >= paperReview.nos.length) {
     paperReview.run.status = 'completed'; paperReview.run.mt = Date.now(); save();
-    const title = paperReview.source.title; paperReviewRelease(); sessionChrome(false);
-    app().innerHTML = `<h1>原卷訂正完成</h1><div class="card good"><p class="big"><b>${escH(title)}</b>的錯題已完成三級分類。</p><p>可以直接把每題留下的破題方向拿給老師看；這份結果也已同步保存。</p><div class="actr"><button class="btn primary" onclick="renderCorrections()">回隔日訂正</button></div></div>`;
+    const title = paperReview.source.title, finishedRunId = paperReview.run.id; paperReviewRelease(); sessionChrome(false);
+    app().innerHTML = `<h1>原卷訂正完成</h1><div class="card good"><p class="big"><b>${escH(title)}</b>的錯題已完成三級分類。</p><p>可以直接把每題留下的破題方向拿給老師看；這份結果也已同步保存。</p><div class="actr"><button class="btn" onclick="renderPaperTeacherReport('${jsA(finishedRunId)}')">給老師看這一回</button><button class="btn primary" onclick="renderCorrections()">回隔日訂正</button></div></div>`;
     return;
   }
   const no = paperReview.nos[paperReview.i], q = paperReview.source.key[no - 1];
   const state = paperReview.run.review[no] = paperReview.run.review[no] || { done: false, attempts: 0, logs: [] };
   const scanIndex = paperQuestionScanIndex(paperReview.source, no), scan = paperReview.source.scans[scanIndex];
-  const prior = (state.logs || []).map((log, i) => `<li>第 ${i + 1} 次：${log.direction ? escH(log.direction) : `${escH(TOPICS[log.topic] || '')}／${escH(log.concept || '')}`}</li>`).join('');
+  const prior = (state.logs || []).map((log, i) => `<li>第 ${i + 1} 次：${log.direction ? escH(log.direction) : `${escH(TOPICS[log.topic] || '')}／${escH(log.concept || '')}`}${log.errorKind ? ` <span class="dim">｜卡點：${escH(log.errorKind)}</span>` : ''}</li>`).join('');
   const detail = state.aiDetail;
   const detailBlock = detail ? `<div class="paper-detail-result">
       <span class="eyebrow">第二次批改｜GPT‑5.5 詳細診斷</span>
@@ -6977,7 +7696,7 @@ function renderPaperAnswerReview() {
     <section class="paper-review-work card"><span class="eyebrow">隔日重新嘗試</span><h1>第 ${no} 題</h1><div class="blind-answer"><p>最終答案：<b class="big">${escH(paperFinalAnswerText(q))}</b></p></div>
       ${prior ? `<details><summary>我前面已試過的方向</summary><ol>${prior}</ol></details>` : ''}
       ${detailBlock || `<div class="correction-fields"><label>我隔天重新計算／嘗試的破題方向<textarea id="paper-review-direction" rows="5" placeholder="把重新計算到哪裡、第一個具體切入點，或卡住的式子寫下來；不用保證已經算完。"></textarea></label>
-      <div class="fallback-fields"><label>如果沒有方向，至少判斷所屬單元<select id="paper-review-topic">${visionTopicOptions('')}</select></label><label>可能卡住的單元重點<input id="paper-review-concept" placeholder="例如：條件機率的樣本空間"></label></div></div>
+      <div class="fallback-fields"><label>這題主要卡在哪裡<select id="paper-review-error-kind">${paperErrorKindOptions(state.errorKind || '')}</select></label><label>如果沒有方向，至少判斷所屬單元<select id="paper-review-topic">${visionTopicOptions(state.topic || '')}</select></label><label>可能卡住的單元重點<input id="paper-review-concept" placeholder="例如：條件機率的樣本空間"></label></div></div>
       <p id="paper-review-msg" class="warnc"></p><div class="actr"><button class="btn primary" onclick="paperReviewComplete(2)">只看答案就算出，列為第二級</button><button class="btn" onclick="paperReviewStuck()">仍沒算出，保存這次嘗試</button></div>
       ${detailGate}`}
     </section></div>`;
@@ -6989,25 +7708,38 @@ function paperReviewEffort() {
   const direction = String((($('#paper-review-direction') || {}).value || '')).trim().slice(0, 800);
   const topic = String((($('#paper-review-topic') || {}).value || '')).trim();
   const concept = String((($('#paper-review-concept') || {}).value || '')).trim().slice(0, 160);
+  const errorKind = String((($('#paper-review-error-kind') || {}).value || '')).trim();
   const msg = $('#paper-review-msg');
+  if (!PAPER_ERROR_KINDS.includes(errorKind)) {
+    if (msg) msg.textContent = '先選一個這題最接近的卡點，之後才能累積有用的錯因分析。';
+    return null;
+  }
   if (direction.length < 8 && !(topic && concept.length >= 2)) {
     if (msg) msg.textContent = '先留下具體方向；真的沒有方向，就至少選單元並寫出可能卡住的重點。';
     return null;
   }
-  return { ts: Date.now(), direction, topic, concept };
+  return { ts: Date.now(), direction, topic, concept, errorKind };
 }
 function paperReviewStuck() {
   const effort = paperReviewEffort(); if (!effort) return;
   const no = paperReview.nos[paperReview.i], state = paperReview.run.review[no];
   state.logs = state.logs || []; state.logs.push(effort); state.attempts = (state.attempts || 0) + 1;
-  paperReview.detailError = ''; paperReview.run.mt = Date.now(); save(); renderPaperAnswerReview();
+  state.topic = effort.topic || state.topic || ''; state.errorKind = effort.errorKind;
+  paperReview.run.mt = Date.now();
+  paperRunRefreshLearningTags(paperReview.run);
+  paperSourceUpdateExtMock(paperReview.source, paperReview.run);
+  paperReview.detailError = ''; save(); renderPaperAnswerReview();
 }
 function paperReviewComplete(level) {
   const effort = paperReviewEffort(); if (!effort) return;
   const no = paperReview.nos[paperReview.i], state = paperReview.run.review[no];
   state.logs = state.logs || []; state.logs.push(effort); state.done = true; state.level = 2;
   state.outcome = 'answer-only'; state.completedAt = Date.now();
-  paperReview.run.mt = Date.now(); save(); paperReview.i++; renderPaperAnswerReview();
+  state.topic = effort.topic || state.topic || ''; state.errorKind = effort.errorKind;
+  paperReview.run.mt = Date.now();
+  paperRunRefreshLearningTags(paperReview.run);
+  paperSourceUpdateExtMock(paperReview.source, paperReview.run);
+  save(); paperReview.i++; renderPaperAnswerReview();
 }
 async function paperReviewDetailed() {
   if (!paperReview || paperReview.detailLoading) return;
@@ -7020,6 +7752,7 @@ async function paperReviewDetailed() {
   }
   review.detailLoading = true; review.detailError = ''; renderPaperAnswerReview();
   try {
+    await syncPush();
     const page = paperQuestionScanIndex(review.source, no);
     const image = await paperReviewPageComposite(page);
     if (paperReview !== review) return;
@@ -7042,7 +7775,11 @@ function paperReviewFinishDetailed() {
   const no = paperReview.nos[paperReview.i], state = paperReview.run.review[no];
   if (!state || !(state.attempts > 0) || !state.aiDetail) return;
   state.done = true; state.level = 3; state.outcome = 'ai-detail'; state.completedAt = Date.now();
-  paperReview.run.mt = Date.now(); save(); paperReview.i++; paperReview.detailError = ''; renderPaperAnswerReview();
+  state.aiErrorKind = state.aiDetail.errorKind || '';
+  paperReview.run.mt = Date.now();
+  paperRunRefreshLearningTags(paperReview.run);
+  paperSourceUpdateExtMock(paperReview.source, paperReview.run);
+  save(); paperReview.i++; paperReview.detailError = ''; renderPaperAnswerReview();
 }
 function startCorrection(batchId) {
   const batch = (S.corrections || []).find((b) => b.id === batchId);
@@ -7394,10 +8131,48 @@ function reviewNext() {
 }
 
 /* ═══════════ 數據 ═══════════ */
+function paperLearningSummaryCard() {
+  const runs = (S.paperRuns || []).filter((run) => run && run.aiGrade && run.status !== 'discarded')
+    .sort((a, b) => Number(b.submittedAt || 0) - Number(a.submittedAt || 0));
+  if (!runs.length) return `<section class="card paper-learning-summary"><span class="eyebrow">原版模考分析</span><h2>完成第一回後開始累積</h2><p class="dim">系統會分開統計正式 20 題校準卷與 19 題練習卷，並從隔日訂正整理常錯單元、卡點和三級分布。</p></section>`;
+  const topicCount = {}, errorCount = {};
+  let l1 = 0, l2 = 0, l3 = 0, open = 0;
+  for (const run of runs) {
+    const levels = paperRunLevelCounts(run);
+    l1 += levels.l1; l2 += levels.l2; l3 += levels.l3; open += levels.open;
+    for (const state of Object.values(run.review || {})) {
+      if (!state || typeof state !== 'object') continue;
+      const topic = state.topic || [...(state.logs || [])].reverse().find((log) => log && log.topic)?.topic;
+      const error = state.aiErrorKind || state.errorKind || [...(state.logs || [])].reverse().find((log) => log && log.errorKind)?.errorKind;
+      if (topic && TOPICS[topic]) topicCount[topic] = (topicCount[topic] || 0) + 1;
+      if (error) errorCount[error] = (errorCount[error] || 0) + 1;
+    }
+  }
+  const topTopics = Object.entries(topicCount).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const topErrors = Object.entries(errorCount).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const maxTopic = Math.max(1, ...topTopics.map((item) => item[1]));
+  const maxError = Math.max(1, ...topErrors.map((item) => item[1]));
+  const bars = (items, max, label) => items.length ? items.map(([key, count]) =>
+    `<div class="bar-row"><span class="bar-label">${escH(label(key))}</span><div class="bar"><div class="bar-fill y" style="width:${Math.round(count / max * 100)}%"></div></div><span class="bar-val">${count} 題</span></div>`).join('')
+    : '<p class="dim">完成隔日訂正並選擇單元／卡點後，這裡會開始出現趨勢。</p>';
+  const recent = runs.slice(0, 6).map((run) => {
+    const source = paperSourceById(run.sourceId);
+    const formal = source && source.questions === 20 && source.calibrationEligible !== false;
+    return `<div class="report-row"><span>${escH(run.d || '')}｜${escH(run.name || '')}</span><b>${run.score}/100</b><small class="${formal ? 'okc' : 'dim'}">${formal ? '正式校準' : '練習分析'}</small><button class="btn sm" onclick="renderPaperTeacherReport('${jsA(run.id)}')">逐題</button></div>`;
+  }).join('');
+  return `<section class="card paper-learning-summary"><span class="eyebrow">原版模考分析</span><h2>從「錯幾分」追到「為何找不到方向」</h2>
+    <div class="paper-level-summary"><span>第一級 <b>${l1}</b></span><span>第二級 <b>${l2}</b></span><span>第三級 <b>${l3}</b></span><span>待訂正 <b>${open}</b></span></div>
+    <div class="paper-analysis-grid"><div><h3>較常失分的單元</h3>${bars(topTopics, maxTopic, (key) => TOPICS[key] || key)}</div><div><h3>較常出現的卡點</h3>${bars(topErrors, maxError, (key) => key)}</div></div>
+    <h3>最近原版模考</h3><div class="report-list">${recent}</div></section>`;
+}
 function renderStats() {
   const entries = (S.corrections || []).flatMap((b) => b.entries || []);
   const done = entries.filter((x) => x.done);
   const levels = { l1: done.filter((x) => correctionLevel(x) === 1).length, l2: done.filter((x) => correctionLevel(x) === 2).length, l3: done.filter((x) => correctionLevel(x) === 3).length };
+  for (const run of (S.paperRuns || []).filter((item) => item && item.aiGrade && item.status !== 'discarded')) {
+    const paperLevels = paperRunLevelCounts(run);
+    levels.l1 += paperLevels.l1; levels.l2 += paperLevels.l2; levels.l3 += paperLevels.l3;
+  }
   const visionDone = (S.visionHistory || []).filter((x) => x.outcome !== 'obvious');
   const visionFirst = visionDone.filter((x) => Number(x.days || 0) === 1 && ['works', 'different', 'fails'].includes(x.outcome)).length;
   const visionTwoDay = visionDone.filter((x) => Number(x.days || 0) >= 2).length;
@@ -7410,6 +8185,7 @@ function renderStats() {
       <section><span>破題方向</span><b>${visionFirst}</b><small>題第一天已有方向｜${visionTwoDay} 題用足兩天</small></section>
       <section><span>觀念理解</span><b>${conceptsUnderstood}/${CONCEPT_CARDS.length}</b><small>張能用自己的話說清楚</small></section>
     </div>
+    ${paperLearningSummaryCard()}
     ${syncCard()}
     ${aiCard()}
     ${packCard()}
@@ -7854,15 +8630,35 @@ let syncState = { user: null, msg: '', last: null };
 let syncTimer = null;
 let syncPushPromise = null;
 let syncPushAgain = false;
+let authSwitchPromise = Promise.resolve();
+let activeAuthUserId = '';
 function supaInit() {
   if (!window.supabase) { syncPill(); return; } // CDN 被擋（artifact 環境）→ 純本機模式
   supa = window.supabase.createClient(SUPA_URL, SUPA_KEY);
   autoLoginFromHash();
   supa.auth.onAuthStateChange((ev, session) => {
-    const was = syncState.user && syncState.user.id;
-    syncState.user = session ? session.user : null;
-    if (syncState.user && syncState.user.id !== was) { syncPull(); probeContent(); }
-    syncPill();
+    const nextUser = session ? session.user : null;
+    const nextId = nextUser && nextUser.id || '';
+    const was = activeAuthUserId;
+    activeAuthUserId = nextId;
+    authSwitchPromise = authSwitchPromise.then(async () => {
+      syncState.user = nextUser;
+      if (nextUser && nextId !== was) {
+        await activateUserState(nextUser);
+        await syncPull();
+        probeContent();
+        flushInkQueue();
+        nav(document.body.dataset.view || 'home');
+      } else if (!nextUser && was) {
+        await deactivateUserState();
+        syncState.revision = 0;
+        nav('home');
+      }
+      syncPill();
+    }).catch((error) => {
+      syncState.msg = '切換帳號時本機資料載入失敗：' + ((error && error.message) || '請重新整理');
+      syncPill();
+    });
   });
   window.addEventListener('online', () => { if (syncState.user) { syncPush(); flushInkQueue(); } });
   document.addEventListener('visibilitychange', () => {
@@ -8020,6 +8816,51 @@ async function syncPull() {
     syncPush();
   } catch (e) { syncState.msg = '離線（資料在本機）'; syncPill(); }
 }
+function mergePaperReviewState(A, B) {
+  const newer = Number(B && (B.mt || B.completedAt) || 0) >= Number(A && (A.mt || A.completedAt) || 0) ? B : A;
+  const older = newer === A ? B : A;
+  const logs = [], seen = new Set();
+  for (const log of [...(older && older.logs || []), ...(newer && newer.logs || [])]) {
+    const key = `${log && log.ts || ''}|${log && log.note || ''}|${log && log.resolved ? 1 : 0}`;
+    if (!seen.has(key)) { seen.add(key); logs.push(log); }
+  }
+  logs.sort((x, y) => Number(x && x.ts || 0) - Number(y && y.ts || 0));
+  return {
+    ...(older || {}), ...(newer || {}),
+    attempts: Math.max(Number(A && A.attempts || 0), Number(B && B.attempts || 0)),
+    logs,
+    done: !!(A && A.done || B && B.done),
+    completedAt: Math.max(Number(A && A.completedAt || 0), Number(B && B.completedAt || 0)) || null,
+    detailUnlockedAt: Math.max(Number(A && A.detailUnlockedAt || 0), Number(B && B.detailUnlockedAt || 0)) || null,
+    mt: Math.max(Number(A && A.mt || 0), Number(B && B.mt || 0)),
+  };
+}
+function mergePaperRunRecord(A, B) {
+  if (!A) return B;
+  if (!B) return A;
+  const newer = Number(B.mt || B.submittedAt || B.createdAt || 0) >= Number(A.mt || A.submittedAt || A.createdAt || 0) ? B : A;
+  const older = newer === A ? B : A;
+  const review = {};
+  for (const no of new Set([...Object.keys(A.review || {}), ...Object.keys(B.review || {})])) {
+    review[no] = mergePaperReviewState((A.review || {})[no], (B.review || {})[no]);
+  }
+  const audits = [], auditIds = new Set();
+  for (const audit of [...(A.gradeAudit || []), ...(B.gradeAudit || [])]) {
+    const key = audit && (audit.id || `${audit.at || ''}|${audit.reason || ''}|${audit.score || ''}`);
+    if (key && !auditIds.has(key)) { auditIds.add(key); audits.push(audit); }
+  }
+  audits.sort((x, y) => Number(x.at || 0) - Number(y.at || 0));
+  const topics = [...new Set([...(A.topics || []), ...(B.topics || [])])];
+  const errors = [...new Set([...(A.errors || []), ...(B.errors || [])])];
+  return {
+    ...older, ...newer,
+    mt: Math.max(Number(A.mt || 0), Number(B.mt || 0)),
+    review,
+    gradeAudit: audits.slice(-20),
+    paperInkClients: { ...(older.paperInkClients || {}), ...(newer.paperInkClients || {}) },
+    topics, errors,
+  };
+}
 function mergeState(a, b) {
   // 兩台裝置各自累積也不丟資料：紀錄類取聯集，其餘欄位取較「多」的一方
   const akey = (x) => `${x.ts || ''}|${x.qid}|${x.d}|${x.ms}|${x.ok}`; // 一律含 qid：同一毫秒的兩筆不同題（模考批改常見）不可塌成一筆
@@ -8087,9 +8928,21 @@ function mergeState(a, b) {
     correctionMap.set(batch.id, old ? mergeCorrectionBatch(old, batch) : batch);
   }
   const corrections = [...correctionMap.values()].sort((x, y) => Number(x.mockTs || 0) - Number(y.mockTs || 0));
-  const emset = new Set((a.extMocks || []).map((m) => JSON.stringify(m)));
-  const extMocks = [...(a.extMocks || [])];
-  for (const m of b.extMocks || []) if (!emset.has(JSON.stringify(m))) extMocks.push(m);
+  const extMockMap = new Map();
+  for (const row of [...(b.extMocks || []), ...(a.extMocks || [])]) {
+    if (!row) continue;
+    const key = row.paperRunId || row.id || `${row.d || ''}|${row.name || ''}|${row.ts || ''}`;
+    const old = extMockMap.get(key);
+    if (!old) { extMockMap.set(key, row); continue; }
+    const newer = Number(row.mt || row.ts || 0) >= Number(old.mt || old.ts || 0) ? row : old;
+    const older = newer === row ? old : row;
+    extMockMap.set(key, {
+      ...older, ...newer,
+      topics: [...new Set([...(older.topics || []), ...(newer.topics || [])])],
+      errors: [...new Set([...(older.errors || []), ...(newer.errors || [])])],
+    });
+  }
+  const extMocks = [...extMockMap.values()].sort((x, y) => Number(x.ts || x.mt || 0) - Number(y.ts || y.mt || 0));
   const daily = { ...(b.daily || {}) };
   for (const d of Object.keys(a.daily || {})) daily[d] = { ...(daily[d] || {}), ...a.daily[d] };
   // 🎯 類題支線紀錄：兩裝置聯集（以 ts 去重），別讓其中一方蓋掉另一方
@@ -8119,7 +8972,7 @@ function mergeState(a, b) {
   for (const run of [...(b.paperRuns || []), ...(a.paperRuns || [])]) {
     if (!run || !run.id) continue;
     const old = paperMap.get(run.id);
-    if (!old || Number(run.mt || run.submittedAt || run.createdAt || 0) >= Number(old.mt || old.submittedAt || old.createdAt || 0)) paperMap.set(run.id, run);
+    paperMap.set(run.id, old ? mergePaperRunRecord(old, run) : run);
   }
   const paperRuns = [...paperMap.values()].sort((x, y) => Number(x.createdAt || 0) - Number(y.createdAt || 0));
   const merged = { ...b, ...a, attempts, wrong, drills, mocks, corrections, extMocks, daily, extbank, sidePractice,
@@ -8183,6 +9036,7 @@ async function flushInkQueue() {
         t0: local.t0,
         proc: local.proc || null,
         strokes: local.strokes,
+        updated_at: new Date(Number(local.updatedAt) || Date.now()).toISOString(),
       };
       const { error } = await supa.from('ink_sessions').upsert(row, { onConflict: 'user_id,client_id' });
       if (error) {

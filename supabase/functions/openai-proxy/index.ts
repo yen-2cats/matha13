@@ -23,6 +23,108 @@ const allowedEmails = new Set(
     email.toLowerCase()
   ),
 );
+const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+const requestWeights: Record<string, number> = {
+  paper_grade: 12,
+  paper_detail: 5,
+  outline: 3,
+  grade: 2,
+  process: 2,
+  concept: 2,
+  text: 1,
+  test: 1,
+};
+
+async function serviceRpc(name: string, body: Record<string, unknown>) {
+  if (!serviceRoleKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+  const response = await fetch(
+    `${APP_SUPABASE_URL}/rest/v1/rpc/${encodeURIComponent(name)}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(String(
+      payload && typeof payload === "object" &&
+          (payload as Record<string, unknown>).message ||
+        `Supabase RPC ${response.status}`,
+    ));
+  }
+  return payload;
+}
+
+async function claimAiBudget(userId: string, responseType: string) {
+  return await serviceRpc("claim_ai_request", {
+    p_user_id: userId,
+    p_kind: responseType,
+    p_weight: requestWeights[responseType] || 1,
+  }) as Record<string, unknown>;
+}
+
+async function recordAiUsage(
+  userId: string,
+  usage: Record<string, unknown> | undefined,
+) {
+  if (!usage) return;
+  await serviceRpc("record_ai_usage", {
+    p_user_id: userId,
+    p_input_tokens: Number(usage.input_tokens) || 0,
+    p_output_tokens: Number(usage.output_tokens) || 0,
+  });
+}
+
+function taipeiDate() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+async function verifyPaperDetailGate(userId: string, rawContext: unknown) {
+  if (!serviceRoleKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+  const context = rawContext && typeof rawContext === "object"
+    ? rawContext as Record<string, unknown>
+    : {};
+  const runId = String(context.paperRunId || "");
+  const questionNo = Number(context.questionNo);
+  if (!runId || !Number.isInteger(questionNo) || questionNo < 1 || questionNo > 20) {
+    return false;
+  }
+  const query = new URL(`${APP_SUPABASE_URL}/rest/v1/app_state`);
+  query.searchParams.set("select", "data");
+  query.searchParams.set("user_id", `eq.${userId}`);
+  query.searchParams.set("limit", "1");
+  const response = await fetch(query, {
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+    },
+  });
+  if (!response.ok) throw new Error(`Cannot verify paper review (${response.status})`);
+  const rows = await response.json() as Array<Record<string, unknown>>;
+  const data = rows[0] && rows[0].data as Record<string, unknown> | undefined;
+  const runs = Array.isArray(data && data.paperRuns) ? data.paperRuns : [];
+  const run = runs.find((item) =>
+    item && typeof item === "object" &&
+    String((item as Record<string, unknown>).id || "") === runId
+  ) as Record<string, unknown> | undefined;
+  if (!run || String(run.due || "") > taipeiDate()) return false;
+  const review = run.review && typeof run.review === "object"
+    ? run.review as Record<string, unknown>
+    : {};
+  const state = review[String(questionNo)] as Record<string, unknown> | undefined;
+  const logs = Array.isArray(state && state.logs) ? state.logs : [];
+  return !!state && (Number(state.attempts) > 0 || logs.length > 0);
+}
 
 function corsHeaders(origin: string) {
   const headers: Record<string, string> = {
@@ -215,6 +317,7 @@ const responseSchemas = {
               enum: ["correct", "incorrect", "unanswered", "uncertain"],
             },
             hasFinalAnswer: { type: "boolean" },
+            finalAnswer: { type: "string", maxLength: 120 },
             selectedOptions: {
               type: "array",
               maxItems: 5,
@@ -233,6 +336,7 @@ const responseSchemas = {
             "read",
             "status",
             "hasFinalAnswer",
+            "finalAnswer",
             "selectedOptions",
             "points",
             "marks",
@@ -460,6 +564,25 @@ Deno.serve(async (req: Request) => {
       return reply(origin, 400, { message: "instructions 過長" });
     }
     const input = isTest ? "ping" : normalizeMessages(body.messages);
+    if (
+      responseType === "paper_detail" &&
+      !(await verifyPaperDetailGate(userId, body.context))
+    ) {
+      return reply(origin, 403, {
+        message:
+          "第二次詳批尚未解鎖：必須到隔天，且先同步至少一次獨立重想紀錄。",
+      });
+    }
+    const budget = await claimAiBudget(userId, responseType);
+    if (!budget || budget.allowed !== true) {
+      const reason = String(budget && budget.reason || "");
+      return reply(origin, 429, {
+        message: reason === "rate_limited"
+          ? "請稍候幾秒再送出，避免重複扣用量。"
+          : "今天的 AI 安全額度已用完；作答與筆跡仍會正常保存，明天再批改。",
+        reason,
+      });
+    }
 
     const requestBody: Record<string, unknown> = {
       model,
@@ -536,7 +659,11 @@ Deno.serve(async (req: Request) => {
     }
     const text = outputText(response);
     if (!text) return reply(origin, 502, { message: "OpenAI 沒有回傳文字" });
-    const common = { model: response.model, usage: response.usage };
+    await recordAiUsage(
+      userId,
+      response.usage as Record<string, unknown> | undefined,
+    ).catch(() => {});
+    const common = { model: response.model, usage: response.usage, budget };
     if (isStructured) {
       try {
         return reply(origin, 200, { ...common, json: JSON.parse(text) });
