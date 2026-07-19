@@ -765,7 +765,7 @@ function importData(input) {
     try {
       const d = JSON.parse(r.result);
       // 內容信封 v2：{kind:'qpack'|'flash'|'notes'|'outline', name, items:[…]}
-      if (d && d.kind && !Array.isArray(d.items)) { alert(`內容包格式不對：items 必須是陣列（kind=${escH(String(d.kind))}）。`); return; }
+      if (d && d.kind && !Array.isArray(d.items)) { alert(`內容包格式不對：items 必須是陣列（kind=${String(d.kind)}）。`); return; } // alert 是純文字對話框，escH 反而會顯示出 &lt; 實體
       if (d && d.kind && Array.isArray(d.items)) {
         if (d.kind === 'qpack') { importQPack(d.items, d.name); return; }
         if (d.kind === 'flash' || d.kind === 'notes' || d.kind === 'outline') {
@@ -2558,6 +2558,15 @@ function parseFrac(s) {
   const n = parseFloat(s);
   return new RegExp('^' + NUM + '$').test(s) ? n : NaN;
 }
+/* 學測多選給分（全 app 唯一實作）：全對滿分、錯 1 個選項 3/5、錯 2 個 1/5、錯 3 個以上或空白（未作答）0 分。
+   optionIndexes＝該題全部選項的索引宇集（系統模考 0-based、掃描卷 1-based），逐一比對「該勾沒勾／不該勾卻勾」。 */
+function multiPartialPoints(points, chosenArr, correctArr, optionIndexes) {
+  const chosen = new Set(chosenArr || []);
+  if (!chosen.size) return 0; // 空白＝未作答：不給部分分（與跳過同分，堵住「亂送空白反而拿分」）
+  const correct = new Set(correctArr || []);
+  const errors = optionIndexes.filter((i) => chosen.has(i) !== correct.has(i)).length;
+  return errors === 0 ? points : errors === 1 ? points * .6 : errors === 2 ? points * .2 : 0;
+}
 function checkFill(input, accepted) {
   const ni = norm(input);
   if (accepted.some((a) => norm(a) === ni)) return true;
@@ -3124,7 +3133,7 @@ function dayAgg() {
     add(a.d, 1, a.ok ? 1 : 0, a.ms || 0, W[(q && q.diff) || 2]);
   }
   for (const k of Object.keys(S.drills)) {
-    for (const h of S.drills[k]) add(h.d, 12, Math.round(12 * (h.acc || 0) / 100), (h.med || 0) * 12, 3); // 速訓一輪=3點
+    for (const h of S.drills[k]) { const n = h.n || 12; add(h.d, n, Math.round(n * (h.acc || 0) / 100), (h.med || 0) * n, 3); } // 速訓一輪=3點；n＝該輪實際題數（舊資料無 n 當 12，同 dayCounts）
   }
   if (S.phone && S.phone.days) {
     for (const d of Object.keys(S.phone.days)) { const p = S.phone.days[d]; add(d, p.n || 0, p.ok || 0, p.ms || 0, p.n || 0); } // 手機專區每題算 1 點；全欄位 NaN-proof（防外部污染的 localStorage/雲端列）
@@ -3200,7 +3209,9 @@ function renderDayCounter() {
   const rows = [['速訓', c.drill, DAY_STD.drill], ['易', c.e, DAY_STD.e], ['中', c.m, DAY_STD.m], ['難', c.h, DAY_STD.h]];
   // 首次使用預設收合，避免桌機右上角與手機底部同時出現過多浮動資訊；
   // 使用者主動展開後才記住展開狀態（'0'）。
-  if (localStorage.getItem('mathA13_dayctr_collapsed') !== '0') {
+  let collapsedPref = null; // Safari 無痕等儲存被拒的環境不能讓 boot 內的計數表把整個啟動炸掉
+  try { collapsedPref = localStorage.getItem('mathA13_dayctr_collapsed'); } catch (_) {}
+  if (collapsedPref !== '0') {
     const done = rows.filter((r) => r[1] >= r[2]).length;
     el.className = 'dayctr collapsed';
     el.innerHTML = '<button class="dc-toggle" onclick="dayCounterToggle()" title="展開今日計數表">📊 ' + done + '/4</button>';
@@ -3211,8 +3222,10 @@ function renderDayCounter() {
     + rows.map((r) => '<div class="dc-row' + (r[1] >= r[2] ? ' done' : '') + '"><span class="dc-lab">' + r[0] + '</span><span class="dc-num">' + r[1] + '<i>/' + r[2] + '</i></span></div>').join('');
 }
 function dayCounterToggle() {
-  const cur = localStorage.getItem('mathA13_dayctr_collapsed') !== '0';
-  localStorage.setItem('mathA13_dayctr_collapsed', cur ? '0' : '1');
+  try {
+    const cur = localStorage.getItem('mathA13_dayctr_collapsed') !== '0';
+    localStorage.setItem('mathA13_dayctr_collapsed', cur ? '0' : '1');
+  } catch (_) {}
   renderDayCounter();
 }
 const DAY_GOAL = 30; // 每日題數目標（速訓12＋錯題＋刷題8＋手機零碎 ≈ 30）
@@ -3501,11 +3514,9 @@ function exitFlow(view) {
     }
     return;
   }
-  if (sessionMode === 'prac' || sessionMode === 'review' || sessionMode === 'correction') {
+  if (sessionMode === 'prac' || sessionMode === 'review') { // correction 在上面已 return，不會走到這裡
     const nDone = sessionMode === 'review'
       ? (review ? review.i : 0)
-      : sessionMode === 'correction'
-        ? (correction ? correction.i : 0)
       : S.attempts.length - (sessSnap ? sessSnap.att : S.attempts.length);
     modal(`<h2>要中途離開嗎？</h2><p>這一輪已完成 <b>${Math.max(0, nDone)}</b> 題（已記錄），進行中的這題不會保留。</p>`, [
       ['繼續作答', resume, 'primary'],
@@ -4830,7 +4841,7 @@ function pracDone() {
       ${stuckRecap}
       <table class="tbl"><tr><th>單元</th><th>結果</th>${showSpeed ? '<th>耗時/目標</th>' : ''}<th>錯因</th></tr>${rows}</table>
       <div class="actr"><button class="btn" onclick="nav('stats')">看數據</button>
-      <button class="btn primary" onclick="nav('prac')">再刷一輪</button></div>
+      ${prac.topics && prac.topics.length ? `<button class="btn primary" onclick="startPracTopics([${prac.topics.map((t) => `'${t}'`).join(',')}], ${prac.cnt || 6})">再刷一輪</button>` : ''}</div>
     </div>`;
 }
 
@@ -6871,11 +6882,8 @@ function paperNormalizeAiGrade(source, raw, model) {
         status = 'unanswered';
         points = 0;
       } else {
-        const selected = new Set(selectedOptions), correct = new Set(correctOptions);
-        const differences = [1, 2, 3, 4, 5]
-          .filter((option) => selected.has(option) !== correct.has(option)).length;
-        points = differences === 0 ? q.points : differences === 1 ? q.points * .6 : differences === 2 ? q.points * .2 : 0;
-        status = differences === 0 ? 'correct' : 'incorrect';
+        points = multiPartialPoints(q.points, selectedOptions, correctOptions, [1, 2, 3, 4, 5]);
+        status = points === q.points ? 'correct' : 'incorrect';
       }
     } else if (explicitlyUnanswered) {
       status = 'unanswered';
@@ -7533,12 +7541,7 @@ function mockAnswerResult(q, a) {
   } else if (a.type === 'inkfill') { ok = !!mock.judge[q.id]; yourAns = '（手寫）'; }
   else { ok = checkFill(a.v, q.ans); yourAns = a.v || '（空白）'; }
   let points = ok ? q.points : 0;
-  if (a.type === 'multi' && !ok) {
-    const chosen = new Set(a.v || []), correct = new Set(q.ans || []);
-    let errors = 0;
-    for (let i = 0; i < (q.opts || []).length; i++) if (chosen.has(i) !== correct.has(i)) errors++;
-    points = Math.max(0, q.points * ((q.opts.length - 2 * errors) / q.opts.length));
-  }
+  if (a.type === 'multi' && !ok) points = multiPartialPoints(q.points, a.v, q.ans, (q.opts || []).map((_, i) => i));
   return { ok, yourAns, points: Math.round(points * 100) / 100 };
 }
 function queueMockCorrection(detail, mockTs) {
@@ -7912,7 +7915,7 @@ function paperReviewStuck() {
 function paperReviewComplete(level) {
   const effort = paperReviewEffort(); if (!effort) return;
   const no = paperReview.nos[paperReview.i], state = paperReview.run.review[no];
-  state.logs = state.logs || []; state.logs.push({ ...effort, kind:'complete' }); state.done = true; state.level = 2;
+  state.logs = state.logs || []; state.logs.push({ ...effort, kind:'complete' }); state.done = true; state.level = level || 2;
   state.outcome = 'answer-only'; state.completedAt = Date.now();
   state.topic = effort.topic || state.topic || ''; state.errorKind = effort.errorKind;
   paperReview.run.mt = Date.now();
@@ -8114,7 +8117,7 @@ function startPracTopics(topics, cnt) {
   if (!pool.length) { alert('這些單元目前沒有題目。'); return; }
   const ac = attCountMap();
   pool = shuffle(pool).sort((a, b) => (ac.get(a.id) || 0) - (ac.get(b.id) || 0));
-  prac = { queue: dedupeStems(pool, Math.min(cnt || 8, pool.length)), i: 0, results: [], mode: 'topic-intervention' };
+  prac = { queue: dedupeStems(pool, Math.min(cnt || 8, pool.length)), i: 0, results: [], mode: 'topic-intervention', topics, cnt: cnt || 8 }; // topics/cnt 留給結果頁「再刷一輪」原樣重開
   sessionActive = true;
   sessionMode = 'prac';
   snapSession();

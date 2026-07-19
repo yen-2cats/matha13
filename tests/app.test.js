@@ -606,3 +606,29 @@ test('validateQ 拒絕原型鏈保留字 id', () => {
   assert.equal(errs[0] !== null && errs[1] !== null && errs[2] !== null, true);
   assert.equal(errs[3], null);
 });
+
+test('多選題空白送出＝未作答＝0 分；部分給分依學測 3/5、1/5 階梯且兩套批改一致', () => {
+  const { run } = loadApp();
+  const q = { id: 'm1', type: 'multi', ans: [0, 2], opts: ['a', 'b', 'c', 'd', 'e'], points: 5 };
+  const cases = plain(run(`(() => {
+    const q = ${JSON.stringify({ id: 'm1', type: 'multi', ans: [0, 2], opts: ['a', 'b', 'c', 'd', 'e'], points: 5 })};
+    return {
+      empty: mockAnswerResult(q, { type: 'multi', v: [] }).points,
+      skip: mockAnswerResult(q, null).points,
+      oneErr: mockAnswerResult(q, { type: 'multi', v: [0] }).points,
+      twoErr: mockAnswerResult(q, { type: 'multi', v: [0, 1] }).points,
+      threeErr: mockAnswerResult(q, { type: 'multi', v: [1, 3, 4] }).points,
+      full: mockAnswerResult(q, { type: 'multi', v: [0, 2] }).points,
+      paperOneErr: multiPartialPoints(5, [1], [1, 3], [1, 2, 3, 4, 5]),
+      paperEmpty: multiPartialPoints(5, [], [1, 3], [1, 2, 3, 4, 5]),
+    };
+  })()`));
+  assert.equal(cases.empty, 0, '空白送出不得優於跳過');
+  assert.equal(cases.skip, 0);
+  assert.equal(cases.oneErr, 3);
+  assert.equal(cases.twoErr, 1);
+  assert.equal(cases.threeErr, 0);
+  assert.equal(cases.full, 5);
+  assert.equal(cases.paperOneErr, 3, '掃描卷與系統模考同一套階梯');
+  assert.equal(cases.paperEmpty, 0);
+});
