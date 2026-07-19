@@ -629,3 +629,15 @@ test('多選題空白送出＝未作答＝0 分；部分給分依學測 3/5、1/
   assert.equal(cases.paperOneErr, 3, '掃描卷與系統模考同一套階梯');
   assert.equal(cases.paperEmpty, 0);
 });
+
+test('src 為 __proto__ 的匯入題不會污染原型鏈或炸掉題包卡', () => {
+  const { run } = loadApp();
+  const result = plain(run(`(() => {
+    extBankArr = () => [{ id: 'evil-1', topic: 'prob', type: 'fill', diff: 1, q: 'q', ans: ['1'], src: '__proto__' }];
+    curatedState = { lastChecked: 0 };
+    const html = packCard();
+    return { html: typeof html === 'string', polluted: {}.n !== undefined };
+  })()`));
+  assert.equal(result.html, true, 'packCard 不得因 __proto__ src 拋錯');
+  assert.equal(result.polluted, false, 'Object.prototype 不得被寫入 n');
+});

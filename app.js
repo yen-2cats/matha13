@@ -477,7 +477,7 @@ async function migrateContentFromS() {
   let moved = false; const changedPids = [];
   const doPack = (pid, kind, nm, items) => { if (upsertPack(pid, kind, nm, items)) changedPids.push(pid); moved = true; };
   if (Array.isArray(S.extbank) && S.extbank.length) {
-    const bySrc = {};
+    const bySrc = Object.create(null); // 同 packCard：src 不可信，"__proto__" 不得打到原型鏈
     for (const q of S.extbank) (bySrc[q.src || '未標來源'] = bySrc[q.src || '未標來源'] || []).push(q);
     for (const src of Object.keys(bySrc)) doPack('legacy-' + strHash(src), 'qpack', src, bySrc[src]);
   }
@@ -6542,7 +6542,7 @@ function renderStats() {
 }
 /* 📦 題庫內容管理：外部題包按來源分組，可停用（紀錄保留、重啟即回） */
 function packCard() {
-  const packs = {};
+  const packs = Object.create(null); // src 是匯入欄位：null-proto 讓 "__proto__" 只是普通 key，索引不打原型鏈
   for (const q of extBankArr()) {
     const src = q.src || '（未標來源）';
     const p = (packs[src] = packs[src] || { n: 0, units: new Set(), d: { 1: 0, 2: 0, 3: 0 }, real: !!q.src });
@@ -6576,7 +6576,7 @@ function packCard() {
     <div class="tblwrap"><table class="tbl"><tr><th>來源</th><th>題數</th><th>覆蓋</th><th>難度分布</th><th></th></tr>${rows}</table></div></div>`;
 }
 function togglePack(src) {
-  S.packOff = S.packOff || {};
+  S.packOff = Object.assign(Object.create(null), S.packOff); // src 是匯入欄位：null-proto 讓 "__proto__" 只是普通 key（同 packCard）
   S.packOff[src] = { off: !packIsOff(src), ts: Date.now() }; // 永不 delete：顯式狀態＋時間戳才能在合併時分出新舊
   save();
   clearTimeout(syncTimer); // reload 會殺掉 4 秒 debounce——先直接推雲端再重載，別靠 unload 競速
