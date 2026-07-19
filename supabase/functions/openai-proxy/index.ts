@@ -63,10 +63,15 @@ async function claimAiBudget(userId: string, responseType: string) {
 
 /* OpenAI 呼叫失敗（HTTP 錯誤/逾時/沒回文字）時退還本次額度：
    否則整卷批改（權重 12）逾時幾次就把一天的安全額度燒光，卻沒拿到任何結果。 */
-async function refundAiBudget(userId: string, responseType: string) {
+async function refundAiBudget(
+  userId: string,
+  responseType: string,
+  usageDate: string,
+) {
   await serviceRpc("refund_ai_request", {
     p_user_id: userId,
     p_weight: requestWeights[responseType] || 1,
+    p_usage_date: usageDate || null, // 退回「扣額那天」的列（80 秒逾時可能跨台北午夜）
   }).catch(() => {});
 }
 
