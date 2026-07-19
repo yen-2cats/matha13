@@ -97,7 +97,7 @@ create index if not exists ink_sessions_user_time
   on public.ink_sessions (user_id, created_at desc);
 
 -- ── 老師方法庫：42 堂課逐字稿蒸餾出的 1662 條方法（概念洞 UI 用） ──
--- 建表後資料用 supabase/upload_methodlib.py 灌入（來源檔在 E:\C槽冷資料\Desktop\重考\_matha_backup\teacher-methodlib.json）
+-- 建表後資料由專案擁有者以本機工具灌入（來源 teacher-methodlib.json 屬私人內容，工具與資料皆不進公開 repo）
 create table if not exists public.teacher_methods (
   id         bigint generated always as identity primary key,
   user_id    uuid not null default auth.uid() references auth.users (id) on delete cascade,
