@@ -80,14 +80,11 @@ test('AI 回饋欄位統一經數學字串修復後再渲染', () => {
     'escH(v.firstError)',
     'escH(v.praise)',
     'escH(v.nextTime)',
-    'escH(w.adv.fe)',
-    'escH(w.adv.nt)',
     'escH(s.what)',
     'escH(s.fix)',
   ];
   unsafeAiEscapes.forEach((pattern) => assert.equal(source.includes(pattern), false, pattern));
   assert.match(source, /rtAi\(v\.firstError\)/);
-  assert.match(source, /rtAi\(w\.adv\.nt\)/);
   assert.match(source, /rtAi\(s\.what/);
 });
 

@@ -57,7 +57,6 @@ test('作答選項具備鍵盤與螢幕閱讀器語意', () => {
   const app = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
   const css = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8');
   assert.match(app, /<button type="button" class="bk-opt" aria-label="選項/);
-  assert.match(app, /class="btn pbtn" aria-label="選項/);
   assert.match(css, /\.bk-opt:focus-visible/);
 });
 

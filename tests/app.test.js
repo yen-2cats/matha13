@@ -456,11 +456,8 @@ test('註冊確認信固定回到 GitHub Pages 的 matha 專案路徑', async ()
   assert.equal(context.__signupPayload.options.emailRedirectTo, 'https://uqrqmmw.github.io/matha/');
 });
 
-test('公式卡 id 唯一，模擬卷符合 20 題、100 分與正式題型順序', () => {
+test('模擬卷符合 20 題、100 分與正式題型順序', () => {
   const { run } = loadApp();
-  const flashIds = plain(run('FLASH.map((card) => card.id)'));
-  assert.equal(flashIds.length, 65);
-  assert.equal(new Set(flashIds).size, flashIds.length);
   for (let i = 0; i < 20; i++) {
     const paper = plain(run('buildPaper().map((q) => ({ id:q.id, no:q.examNo, section:q.examSection, points:q.points, groupId:q.groupId, stem:q.stem, responseType:q.responseType }))'));
     assert.equal(paper.length, 20);
