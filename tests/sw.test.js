@@ -98,12 +98,15 @@ function swContext({ fetchImpl, cacheEntries }) {
 
 test('fetch：部署中的 404/5xx 不得蓋掉手上的好快取', async () => {
   const cachedResponse = { ok: true, cachedShell: true };
-  const { dispatch } = swContext({
-    fetchImpl: async () => ({ ok: false, status: 404 }),
+  const { dispatch, puts } = swContext({
+    // 404 也要有 clone：否則「誤 put 非 OK 回應」的迴歸會在 clone() 丟錯時被吞掉，puts 斷言就測不到
+    fetchImpl: async () => ({ ok: false, status: 404, clone: () => ({ poisoned: true }) }),
     cacheEntries: { 'https://example.test/app.js': cachedResponse },
   });
   const result = await dispatch({ url: 'https://example.test/app.js?v=0718l', method: 'GET', mode: 'no-cors' });
   assert.equal(result, cachedResponse);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(puts.length, 0, '404 不只是不能回給頁面，也絕不能寫進快取（毒化後下次離線就開壞）');
 });
 
 test('fetch：斷網退回快取；網路正常則回網路並以無 query 的 key 更新快取', async () => {

@@ -60,6 +60,17 @@ test('作答選項具備鍵盤與螢幕閱讀器語意', () => {
   assert.match(css, /\.bk-opt:focus-visible/);
 });
 
+test('npm test 的測試清單涵蓋 tests/ 下每個 *.test.js（清單寫死是為了 Windows/Node20 相容，漏列在這裡抓）', () => {
+  // shell glob 在 Windows cmd 不展開、`node --test <目錄>` 與 <glob> 在 Node 20/22 行為不一，
+  // 所以 package.json 逐檔列出；新增測試檔忘了列上去時，這條會紅。
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const files = fs.readdirSync(path.join(ROOT, 'tests')).filter((name) => name.endsWith('.test.js'));
+  assert.equal(files.length > 0, true);
+  for (const name of files) {
+    assert.equal(pkg.scripts.test.includes(`tests/${name}`), true, `package.json test script 漏列 tests/${name}`);
+  }
+});
+
 test('版本戳單一來源：APP_VER、index.html ?v=、sw.js APP_STAMP 完全一致', () => {
   const app = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
