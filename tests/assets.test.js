@@ -60,3 +60,27 @@ test('作答選項具備鍵盤與螢幕閱讀器語意', () => {
   assert.match(app, /class="btn pbtn" aria-label="選項/);
   assert.match(css, /\.bk-opt:focus-visible/);
 });
+
+test('版本戳單一來源：APP_VER、index.html ?v=、sw.js APP_STAMP 完全一致', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const sw = fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
+  const appVer = app.match(/const APP_VER = '([^']+)'/);
+  assert.ok(appVer, '找不到 APP_VER');
+  const swStamp = sw.match(/const APP_STAMP = '([^']+)'/);
+  assert.ok(swStamp, '找不到 sw.js APP_STAMP');
+  assert.equal(swStamp[1], appVer[1], 'sw.js APP_STAMP 必須等於 app.js APP_VER（否則快取名不會換、離線裝置拿到半新半舊）');
+  assert.match(sw, /const CACHE = CACHE_PREFIX \+ APP_STAMP/, '快取名必須由 APP_STAMP 推導，不得手寫死');
+  // index.html 的版本化資產（style/bank/practice-bank/app）全部用同一個戳
+  const versioned = [...html.matchAll(/(?:src|href)="([^"?]+)\?v=([^"]+)"/g)]
+    .filter(([, file]) => /\.(?:js|css)$/.test(file));
+  assert.equal(versioned.length >= 4, true, 'index.html 應有 ?v= 版本化的 js/css 資產');
+  for (const [, file, stamp] of versioned) {
+    assert.equal(stamp, appVer[1], `${file} 的 ?v=${stamp} 與 APP_VER ${appVer[1]} 不一致`);
+  }
+  // SW 快取 key 以無 query URL 為準，SHELL 不得帶 ?v=
+  const shellMatch = sw.match(/const SHELL = (\[[\s\S]*?\]);/);
+  for (const entry of vm.runInNewContext(shellMatch[1])) {
+    assert.equal(entry.includes('?'), false, `SHELL 條目不應帶 query：${entry}`);
+  }
+});
